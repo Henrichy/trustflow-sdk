@@ -78,7 +78,7 @@ export class InterceptorManager<V> {
           state = { ok: true, value: await handler.rejected(state.error) };
         }
       } catch (error) {
-        state = { ok: false, error) };
+        state = { ok: false, error };
       }
     }
 

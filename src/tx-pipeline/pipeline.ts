@@ -17,6 +17,7 @@ import type {
   AssembleParams,
   EstimateFeeOptions,
   FeeBumpOptions,
+  FeeBumpEvent,
   FeeEstimate,
   FeeRange,
   PipelineResult,
@@ -28,7 +29,6 @@ import type {
   SubmittableTransaction,
 } from './types';
 import { logger } from '../utils/logger';
-import { simulateTransaction } from '../contract/simulation';
 import { installTraceContextInterceptor, withSdkSpan } from '../utils/tracing';
 
 const DEFAULT_RETRY_POLICY: Required<Omit<RetryPolicy, 'timeoutMs'>> = {
@@ -60,6 +60,23 @@ const FEE_RELATED_PATTERN = /TRY_AGAIN_LATER|insufficient.?fee|tx_insufficient_f
 function isFeeRelated(error: TrustFlowError): boolean {
   const cause = error.cause instanceof Error ? error.cause.message : '';
   return FEE_RELATED_PATTERN.test(`${error.message} ${cause}`);
+}
+
+/** Only confirmation-poll exhaustion should trigger a fee bump, not RPC transport timeouts. */
+function isConfirmationPollTimeout(error: unknown): boolean {
+  if (error instanceof TrustFlowError) {
+    if (
+      (error.code === 'TIMEOUT' && error.message.includes('confirmation polling')) ||
+      error.message.includes('timed out waiting for transaction')
+    ) {
+      return true;
+    }
+    return isConfirmationPollTimeout(error.cause);
+  }
+  if (error instanceof Error && 'cause' in error) {
+    return isConfirmationPollTimeout(error.cause);
+  }
+  return false;
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -321,76 +338,37 @@ export class TransactionPipeline {
       },
       async (span) => {
         span.setAttribute('transaction.hash', tx.hash().toString('hex'));
-        const outcome = await withRetry(
-          () =>
-            simulateTransaction(
-              this.server,
-              tx,
-              options,
-              this.client.retryConfig,
-              this.client.tracerProvider,
-            ),
+        const response = await withRetry(
+          () => this.server.simulateTransaction(tx),
           options,
           'simulate',
           this.client.timeoutMs,
         );
-        if (!outcome.ok) {
-          if (outcome.error.code === 'RETRY_EXHAUSTED') {
+        if (!response.ok) {
+          if (response.error.code === 'RETRY_EXHAUSTED') {
             return fail(
               TrustFlowError.simulationFailed(
                 'simulateTransaction request failed',
-                outcome.error.cause,
+                response.error.cause,
               ),
             );
           }
-          return fail(outcome.error);
+          return fail(response.error);
         }
-        if (!outcome.data.success) {
-          if (outcome.data.needsRestore) {
-            return fail(
-              TrustFlowError.simulationFailed(
-                'simulation requires restore preamble',
-                outcome.data.restorePreamble,
-              ),
-            );
-          }
+        if (rpc.Api.isSimulationError(response.data)) {
+          return fail(TrustFlowError.simulationFailed(response.data.error));
+        }
+        if (rpc.Api.isSimulationRestore(response.data)) {
           return fail(
-            TrustFlowError.simulationFailed(outcome.data.error ?? 'unknown simulation error'),
+            TrustFlowError.simulationFailed(
+              'simulation requires restore preamble',
+              response.data.restorePreamble,
+            ),
           );
         }
-        // Preserve the full parsed RPC response for callers that need its auth/events metadata.
-        return ok(outcome.data.response as rpc.Api.SimulateTransactionResponse);
+        return ok(response.data);
       },
     );
-    const response = await withRetry(
-      () => this.server.simulateTransaction(tx),
-      options,
-      'simulate',
-      this.client.timeoutMs,
-    );
-    if (!response.ok) {
-      if (response.error.code === 'RETRY_EXHAUSTED') {
-        return fail(
-          TrustFlowError.simulationFailed(
-            'simulateTransaction request failed',
-            response.error.cause,
-          ),
-        );
-      }
-      return response;
-    }
-    if (rpc.Api.isSimulationError(response.data)) {
-      return fail(TrustFlowError.simulationFailed(response.data.error));
-    }
-    if (rpc.Api.isSimulationRestore(response.data)) {
-      return fail(
-        TrustFlowError.simulationFailed(
-          'simulation requires restore preamble',
-          response.data.restorePreamble,
-        ),
-      );
-    }
-    return ok(response.data);
   }
 
   /**
@@ -428,7 +406,6 @@ export class TransactionPipeline {
 
     const tolerance = options?.toleranceMultiplier ?? 1.0;
     const tolBps = BigInt(Math.round(tolerance * 10000));
-
     const inclusionFee: FeeRange = {
       min: ((minInclusionFee * tolBps + 9999n) / 10000n).toString(),
       recommended: ((recommendedInclusionFee * tolBps + 9999n) / 10000n).toString(),
@@ -441,18 +418,12 @@ export class TransactionPipeline {
       recommended: (resFeeBig + BigInt(inclusionFee.recommended)).toString(),
       max: (resFeeBig + BigInt(inclusionFee.max)).toString(),
     };
-
     const cost = {
       cpuInsns: String((simData as any).cost?.cpuInsns ?? '0'),
       memBytes: String((simData as any).cost?.memBytes ?? (simData as any).cost?.memByte ?? '0'),
     };
 
-    return ok({
-      resourceFee,
-      inclusionFee,
-      total,
-      cost,
-    });
+    return ok({ resourceFee, inclusionFee, total, cost });
   }
 
   /**
@@ -476,79 +447,31 @@ export class TransactionPipeline {
       async (span) => {
         const multiplier = options?.resourceFeeMultiplier ?? DEFAULT_RESOURCE_FEE_MULTIPLIER;
         span.setAttribute('transaction.fee_multiplier', multiplier);
-
-        this.pipelineLogger.debug('Preparing transaction', { resourceFeeMultiplier: multiplier });
         return withRetry(
           async () => {
-            const simulation = await simulateTransaction(
-              this.server,
-              tx,
-              options,
-              this.client.retryConfig,
-              this.client.tracerProvider,
-            );
-            if (!simulation.success) {
-              if (simulation.needsRestore) {
-                throw TrustFlowError.simulationFailed(
-                  'simulation requires restore preamble',
-                  simulation.restorePreamble,
-                );
-              }
-              throw TrustFlowError.simulationFailed(simulation.error ?? 'unknown simulation error');
+            const simulation = await this.server.simulateTransaction(tx);
+            if (rpc.Api.isSimulationError(simulation)) {
+              throw TrustFlowError.simulationFailed(simulation.error);
+            }
+            if (rpc.Api.isSimulationRestore(simulation)) {
+              throw TrustFlowError.simulationFailed(
+                'simulation requires restore preamble',
+                simulation.restorePreamble,
+              );
             }
 
-            // `assembleTransaction` reads the resource fee off `transactionData`
-            // itself (not `minResourceFee`), so the headroom must be written
-            // onto the SorobanTransactionData builder for it to take effect.
-            const minFee = Number(simulation.minResourceFee ?? '0');
-            const paddedFee = Math.ceil(minFee * multiplier).toString();
+            const paddedFee = Math.ceil(Number(simulation.minResourceFee) * multiplier).toString();
+            simulation.transactionData.setResourceFee(paddedFee);
             this.pipelineLogger.debug('Transaction prepared', {
               paddedFee,
               minResourceFee: simulation.minResourceFee,
             });
-
-            return rpc
-              .assembleTransaction(tx, {
-                ...(simulation.response as rpc.Api.SimulateTransactionSuccessResponse),
-                transactionData: simulation.transactionData!.setResourceFee(paddedFee),
-                minResourceFee: paddedFee,
-              })
-              .build();
+            return rpc.assembleTransaction(tx, { ...simulation, minResourceFee: paddedFee }).build();
           },
           options,
           'prepare',
           this.client.timeoutMs,
         );
-    const multiplier = options?.resourceFeeMultiplier ?? DEFAULT_RESOURCE_FEE_MULTIPLIER;
-
-    this.pipelineLogger.debug('Preparing transaction', { resourceFeeMultiplier: multiplier });
-    return withRetry(
-      async () => {
-        // Assemble from the *parsed* RPC response: `rpc.assembleTransaction`
-        // needs the full success shape (the Soroban data builder, its auth
-        // entries and the `_parsed` marker), which the shared
-        // `simulateTransaction` helper deliberately reduces to a decoded
-        // outcome. Rebuilding it here would drop the auth entries and make the
-        // SDK re-parse a response that only carries `results` when raw.
-        const simulation = await this.server.simulateTransaction(tx);
-        if (rpc.Api.isSimulationError(simulation)) {
-          throw TrustFlowError.simulationFailed(simulation.error);
-        }
-        if (rpc.Api.isSimulationRestore(simulation)) {
-          throw TrustFlowError.simulationFailed(
-            'simulation requires restore preamble',
-            simulation.restorePreamble,
-          );
-        }
-
-        // `assembleTransaction` reads the resource fee off `transactionData`
-        // itself (not `minResourceFee`), so the headroom must be written
-        // onto the SorobanTransactionData builder for it to take effect.
-        const paddedFee = Math.ceil(Number(simulation.minResourceFee) * multiplier).toString();
-        simulation.transactionData.setResourceFee(paddedFee);
-        this.pipelineLogger.debug('Transaction prepared', { paddedFee, minResourceFee: simulation.minResourceFee });
-
-        return rpc.assembleTransaction(tx, { ...simulation, minResourceFee: paddedFee }).build();
       },
     );
   }
@@ -606,6 +529,106 @@ export class TransactionPipeline {
    * @param options - Poll interval/attempts, overall poll deadline, and retry policy
    */
   async submit(
+    tx: SubmittableTransaction,
+    options?: SubmitOptions,
+  ): Promise<PipelineResult<PipelineSubmission>> {
+    let result = await this.submitEnvelope(tx, options);
+    const feeBumpOptions = options?.feeBump;
+    const maxFeeBump = Math.max(0, Math.floor(feeBumpOptions?.maxFeeBump ?? 0));
+
+    // Fee-bump envelopes cannot be nested. Rebuild every escalation around the
+    // original signed inner transaction, and only auto-escalate a plain tx.
+    if (
+      result.ok ||
+      !(tx instanceof Transaction) ||
+      !feeBumpOptions ||
+      maxFeeBump === 0 ||
+      !isConfirmationPollTimeout(result.error)
+    ) {
+      return result;
+    }
+
+    const multiplier = feeBumpOptions.feeBumpMultiplier ?? 2;
+    if (!Number.isFinite(multiplier) || multiplier <= 1) {
+      this.pipelineLogger.warn('Invalid fee-bump multiplier; returning the original timeout');
+      return result;
+    }
+
+    let currentEnvelope: SubmittableTransaction = tx;
+    let previousBaseFee = BigInt(feeBumpOptions.baseFee ?? tx.fee);
+    const multiplierBps = BigInt(Math.round(multiplier * 10_000));
+
+    for (let bumpNumber = 1; bumpNumber <= maxFeeBump; bumpNumber++) {
+      const stats = await withRetry(
+        () => this.server.getFeeStats(),
+        options,
+        'submit.feeStats',
+        this.client.timeoutMs,
+      );
+      if (!stats.ok) {
+        this.pipelineLogger.warn('Could not read fee stats for automatic fee bump', {
+          error: stats.error.message,
+        });
+        return result;
+      }
+
+      try {
+        const feeStats = stats.data.sorobanInclusionFee.p90 || stats.data.inclusionFee.p90;
+        const networkBaseFee = BigInt(feeStats);
+        const baseline = [previousBaseFee, BigInt(tx.fee), networkBaseFee].reduce((max, fee) =>
+          fee > max ? fee : max,
+        );
+        const baseFee = ((baseline * multiplierBps + 9_999n) / 10_000n).toString();
+        const bumped = this.buildFeeBump(tx, { feeSource: feeBumpOptions.feeSource, baseFee });
+        if (!bumped.ok) {
+          this.pipelineLogger.warn('Automatic fee-bump construction failed', {
+            error: bumped.error.message,
+          });
+          return result;
+        }
+
+        bumped.data.sign(feeBumpOptions.feeSource);
+        await this.notifyFeeBump(feeBumpOptions, {
+          previousHash: currentEnvelope.hash().toString('hex'),
+          hash: bumped.data.hash().toString('hex'),
+          baseFee,
+          attempt: bumpNumber,
+          reason: 'confirmation-timeout',
+        });
+
+        this.pipelineLogger.info('Resubmitting transaction with a higher fee', {
+          bumpNumber,
+          maxFeeBump,
+          baseFee,
+        });
+        currentEnvelope = bumped.data;
+        previousBaseFee = BigInt(baseFee);
+        result = await this.submitEnvelope(bumped.data, { ...options, feeBump: undefined });
+        if (result.ok || !isConfirmationPollTimeout(result.error)) {
+          return result;
+        }
+      } catch (e) {
+        this.pipelineLogger.warn('Automatic fee bump failed; returning the latest submission result', {
+          error: e,
+        });
+        return result;
+      }
+    }
+
+    return result;
+  }
+
+  private async notifyFeeBump(options: FeeBumpOptions, event: FeeBumpEvent): Promise<void> {
+    try {
+      await options.onFeeBump?.(event);
+    } catch (error) {
+      // Notifications must not prevent an already signed recovery envelope from
+      // being submitted.
+      this.pipelineLogger.warn('Fee-bump notification handler failed', { error });
+    }
+  }
+
+  private async submitEnvelope(
     tx: SubmittableTransaction,
     options?: SubmitOptions,
   ): Promise<PipelineResult<PipelineSubmission>> {
@@ -768,6 +791,14 @@ export class TransactionPipeline {
       { 'stellar.network': this.client.network, 'signer.count': 1, 'stellar.fee_bump': true },
       async () => feeBumped.data.sign(feeBumpOptions.feeSource),
     );
+
+    await this.notifyFeeBump(feeBumpOptions, {
+      previousHash: prepared.data.hash().toString('hex'),
+      hash: feeBumped.data.hash().toString('hex'),
+      baseFee: feeBumpOptions.baseFee ?? prepared.data.fee,
+      attempt: 1,
+      reason: 'fee-rejection',
+    });
 
     const escalatedSubmission = await this.submit(feeBumped.data, {
       ...params.submit,
