@@ -1,4 +1,4 @@
-export type WalletType = 'freighter' | 'albedo' | 'xbull' | 'manual';
+export type WalletType = 'freighter' | 'albedo' | 'xbull' | 'manual' | 'ledger';
 
 export interface WalletConnection {
   type: WalletType;
@@ -20,6 +20,9 @@ export interface WalletAdapter {
   signMessage(message: string): Promise<string>;
   disconnect(): Promise<void>;
 }
+
+/** Wallet provider contract, compatible with existing SDK wallet adapters. */
+export type WalletProvider = WalletAdapter;
 
 /**
  * Determines whether an unknown error corresponds to a user declining or rejecting
