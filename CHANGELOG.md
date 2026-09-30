@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Ledger hardware wallet (#362)
+
+- Issue #362: Added `LedgerWalletProvider` with WebHID connection, Stellar BIP-44 accounts, device-reviewed transaction signing, verified signatures, and mock-transport tests.
 ### ⚠️ Breaking Changes
 
 - Issue #350: i128/u128 conversion helpers now throw `TrustFlowError` with code `INVALID_AMOUNT` instead of `RangeError` for invalid amounts. Decimal string bounds are checked before BigInt conversion; valid signed negatives remain supported. See [UPGRADING.md](docs/UPGRADING.md#i128u128-amount-validation-unreleased) for error-handler migration.

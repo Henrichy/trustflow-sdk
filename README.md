@@ -421,6 +421,7 @@ responsibility until a native, backend-backed `MultiSigStateStore` lands — tra
 - **🌐 Browser-Ready**: Bundles for Webpack 5, Rollup, esbuild and Vite with **no Node polyfill configuration**; explicit WebCrypto detection with actionable errors
 - **🔑 Wallet Integration**: Built-in support for Freighter wallet
 - **📱 Mobile wallet links**: `generateSep7Uri` from `@trustflow/sdk/wallet` encodes prepared transaction XDR as a SEP-0007 deep link or QR text payload (see [wallet API](docs/API.md#sep-0007-transaction-deep-links-and-qr-data)).
+- **Ledger hardware wallets**: `LedgerWalletProvider` from `@trustflow/sdk/wallet` connects over WebHID and sends Stellar transactions for review and signing on the device. See [Ledger setup and signing](docs/API.md#ledger-hardware-wallet).
 - **📊 Event Monitoring**: Real-time escrow state change tracking
 - **🛡️ Type Safety**: Full TypeScript support with Zod validation schemas
 - **🧪 Test Coverage**: Comprehensive Jest test suite

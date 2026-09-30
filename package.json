@@ -99,9 +99,13 @@
   },
   "license": "MIT",
   "dependencies": {
+    "@ledgerhq/hw-app-str": "^7.8.0",
+    "@ledgerhq/hw-transport": "^6.36.0",
+    "@ledgerhq/hw-transport-webhid": "^6.36.0",
     "@opentelemetry/api": "^1.9.1",
     "@stellar/stellar-sdk": "^15.1.0",
     "axios": "^1.18.1",
+    "buffer": "^6.0.3",
     "zod": "^3.22.0"
   },
   "peerDependencies": {
