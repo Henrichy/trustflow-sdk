@@ -8,10 +8,11 @@ import type {
   RevealVoteResult,
 } from '../types/juror';
 import type { SDKResult } from '../types/index';
-import { isValidEscrowId, isValidStellarAddress, isValidBase64 } from '../utils/validation';
+
 import { buildVoteArgs } from '../contract/build';
 import { randomBytes } from '../utils/crypto';
 import { TrustFlowError } from '../errors';
+import { VoteSchema } from '../schemas';
 
 const VALID_CHOICES: VoteChoice[] = ['approve', 'reject', 'abstain'];
 
@@ -181,21 +182,19 @@ export class JurorClient {
    * @returns `{ ok: true, data: { txHash, ... } }` on success, `{ ok: false, error }` on failure
    */
   async vote(params: CastVoteParams): Promise<SDKResult<CastVoteResult>> {
-    if (!isValidEscrowId(params.disputeId)) {
-      return { ok: false, error: 'disputeId is required' };
-    }
-    if (!isValidStellarAddress(params.jurorAddress)) {
-      return {
-        ok: false,
-        error: `Invalid Stellar address for "jurorAddress": ${params.jurorAddress}`,
-      };
+    const validation = VoteSchema.safeParse({
+      disputeId: params.disputeId,
+      jurorAddress: params.jurorAddress,
+      vote: params.vote,
+    });
+    if (!validation.success) {
+      const fieldErrors = Object.entries(validation.error.flatten().fieldErrors)
+        .map(([field, msgs]) => `${field}: ${msgs?.join(', ')}`)
+        .join('; ');
+      return { ok: false, error: `Validation failed: ${fieldErrors}` };
     }
 
-    if (params.vote.encrypted) {
-      if (!isValidBase64(params.vote.ciphertext)) {
-        return { ok: false, error: 'vote.ciphertext must be a non-empty base64-encoded string' };
-      }
-    } else if (!VALID_CHOICES.includes(params.vote.choice)) {
+    if (!params.vote.encrypted && !VALID_CHOICES.includes(params.vote.choice as VoteChoice)) {
       return { ok: false, error: `vote.choice must be one of: ${VALID_CHOICES.join(', ')}` };
     }
 

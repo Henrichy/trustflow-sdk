@@ -38,6 +38,7 @@ export { isTrustFlowEvent, parseEvent, parseEvents } from './events';
 export type { RawContractEvent, ParsedEvent, EscrowCreatedData, EscrowReleasedData, DisputeRaisedData } from './events';
 export { SorobanSpec } from './contract/spec';
 export type { SorobanSpecInput, SorobanUnionValue } from './contract/spec';
+export * from './wallet/mock';
 export { TrustFlowClient } from './client';
 export type { GetBalanceOptions } from './client';
 export * from './errors';
@@ -54,8 +55,11 @@ export {
   CreateEscrowSchema,
   ReleaseEscrowSchema,
   DisputeEscrowSchema,
+  ClaimEscrowSchema,
+  FundEscrowSchema,
+  VoteSchema,
   ClientConfigSchema,
   CidSchema,
   parseRpcResponse,
 } from './schemas';
-export type { CreateEscrowInput, ReleaseEscrowInput, DisputeEscrowInput } from './schemas';
+export type { CreateEscrowInput, ReleaseEscrowInput, DisputeEscrowInput, ClaimEscrowInput, FundEscrowInput, VoteInput } from './schemas';

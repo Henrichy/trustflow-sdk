@@ -1,10 +1,11 @@
 import { ContractConfig } from '../types/contract';
 import { EscrowParams, EscrowState, SDKResult, GetGigsParams, GigsPage } from '../types/index';
-import { assertStellarAddress, isValidEscrowId, xlmToStroops, STELLAR_ADDRESS_RE, CONTRACT_ID_RE } from '../utils/validation';
+import { xlmToStroops, STELLAR_ADDRESS_RE, CONTRACT_ID_RE } from '../utils/validation';
 import { createApiHttpClient, toApiErrorMessage } from '../utils/http';
 import type { ApiRetryConfig } from '../utils/http';
 import type { HttpInterceptors } from '../utils/interceptors';
 import { buildCreateEscrowArgs, buildClaimArgs, buildFundArgs } from '../contract/build';
+import { CreateEscrowSchema, ReleaseEscrowSchema, ClaimEscrowSchema, FundEscrowSchema } from '../schemas';
 
 /** Per-call transport overrides for {@link TrustFlowEscrowClient.getGigs}. */
 export interface GetGigsOptions {
@@ -93,11 +94,20 @@ export class TrustFlowEscrowClient {
   async createEscrow(
     params: EscrowParams,
   ): Promise<SDKResult<{ escrowId: string; txHash: string }>> {
-    assertStellarAddress(params.depositor, 'depositor');
-    assertStellarAddress(params.beneficiary, 'beneficiary');
     const amountStroops = xlmToStroops(params.amountXLM);
-    if (amountStroops <= 0n) {
-      return { ok: false, error: 'Amount must be positive' };
+
+    const validation = CreateEscrowSchema.safeParse({
+      sender: params.depositor,
+      recipient: params.beneficiary,
+      amount: amountStroops,
+      network: this.contractConfig.network ?? 'TESTNET',
+    });
+
+    if (!validation.success) {
+      const fieldErrors = Object.entries(validation.error.flatten().fieldErrors)
+        .map(([field, msgs]) => `${field}: ${msgs?.join(', ')}`)
+        .join('; ');
+      return { ok: false, error: `Validation failed: ${fieldErrors}` };
     }
 
     let args: unknown[];
@@ -138,10 +148,16 @@ export class TrustFlowEscrowClient {
    * ```
    */
   async claim(escrowId: string, claimantAddress: string): Promise<SDKResult<{ txHash: string }>> {
-    if (!isValidEscrowId(escrowId)) {
-      return { ok: false, error: 'escrowId is required' };
+    const validation = ClaimEscrowSchema.safeParse({
+      escrowId,
+      claimant: claimantAddress,
+    });
+    if (!validation.success) {
+      const fieldErrors = Object.entries(validation.error.flatten().fieldErrors)
+        .map(([field, msgs]) => `${field}: ${msgs?.join(', ')}`)
+        .join('; ');
+      return { ok: false, error: `Validation failed: ${fieldErrors}` };
     }
-    assertStellarAddress(claimantAddress, 'claimantAddress');
 
     let args: unknown[];
     try {
@@ -179,12 +195,17 @@ export class TrustFlowEscrowClient {
     amountStroops: bigint,
     tokenAddress?: string,
   ): Promise<SDKResult<{ txHash: string }>> {
-    if (!isValidEscrowId(escrowId)) {
-      return { ok: false, error: 'escrowId is required' };
-    }
-    assertStellarAddress(funderAddress, 'funderAddress');
-    if (amountStroops <= 0n) {
-      return { ok: false, error: 'Amount must be positive' };
+    const validation = FundEscrowSchema.safeParse({
+      escrowId,
+      funder: funderAddress,
+      amountStroops,
+      tokenAddress,
+    });
+    if (!validation.success) {
+      const fieldErrors = Object.entries(validation.error.flatten().fieldErrors)
+        .map(([field, msgs]) => `${field}: ${msgs?.join(', ')}`)
+        .join('; ');
+      return { ok: false, error: `Validation failed: ${fieldErrors}` };
     }
 
     let args: unknown[];
@@ -220,10 +241,17 @@ export class TrustFlowEscrowClient {
     escrowId: string,
     releaserAddress: string,
   ): Promise<SDKResult<{ txHash: string }>> {
-    if (!isValidEscrowId(escrowId)) {
-      return { ok: false, error: 'escrowId is required' };
+    const validation = ReleaseEscrowSchema.safeParse({
+      escrowId,
+      caller: releaserAddress,
+      network: this.contractConfig.network ?? 'TESTNET',
+    });
+    if (!validation.success) {
+      const fieldErrors = Object.entries(validation.error.flatten().fieldErrors)
+        .map(([field, msgs]) => `${field}: ${msgs?.join(', ')}`)
+        .join('; ');
+      return { ok: false, error: `Validation failed: ${fieldErrors}` };
     }
-    assertStellarAddress(releaserAddress, 'releaserAddress');
     return { ok: true, data: { txHash: `release-${escrowId}-${Date.now()}` } };
   }
 
