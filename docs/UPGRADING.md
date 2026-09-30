@@ -20,19 +20,8 @@ upgrade a no-op.
 
 ## Upgrade guides
 
-No release has shipped breaking changes yet. The following change is pending release.
-
-### i128/u128 amount validation (Unreleased)
-
-`toI128ScVal` and `toU128ScVal` now throw `TrustFlowError` with code `INVALID_AMOUNT`
-instead of `RangeError` for invalid, unsafe or out-of-range inputs. Update handlers that
-check `error instanceof RangeError` to check
-`error instanceof TrustFlowError && error.code === 'INVALID_AMOUNT'`.
-The shared range guard used by the decoding helpers also reports `INVALID_AMOUNT`.
-
-Valid signed negatives (including `-1` and `-(2 ** 127)`) remain supported by i128;
-u128 rejects negative amounts. Use a `bigint` or base-10 integer string for amounts
-outside JavaScript's safe-integer range. Valid amounts and XDR round trips are unchanged.
+No release has shipped breaking changes yet. The first section will be added by the PR that
+introduces one, using the template below.
 
 <!--
 Template for a new section. Copy it above this comment, newest first.

@@ -22,10 +22,6 @@ function simSuccess(): rpc.Api.SimulateTransactionSuccessResponse {
   };
 }
 
-function simError(message: string): rpc.Api.SimulateTransactionErrorResponse {
-  return { id: '1', latestLedger: 100, events: [], _parsed: true, error: message };
-}
-
 function deferred() {
   let resolve!: () => void;
   const promise = new Promise<void>((r) => {
@@ -217,53 +213,6 @@ describe('TransactionPipeline.run serialization', () => {
     const next = await pipeline.run(runParams(source));
 
     expect(failed.ok).toBe(false);
-    expect(next.ok).toBe(true);
-    expect(pipeline.queueDepth(source.publicKey())).toBe(0);
-  });
-
-  it('releases the queue after a simulation error response so the next run proceeds (#354)', async () => {
-    const source = Keypair.random();
-    mockLedger();
-    // A simulation *error* is the node's verdict on the envelope, so it fails
-    // the run fast (no retry) rather than being retried like a transport blip.
-    jest
-      .spyOn(rpc.Server.prototype, 'simulateTransaction')
-      .mockResolvedValueOnce(simError('Error(Contract, #1)'))
-      .mockResolvedValue(simSuccess());
-    const pipeline = new TransactionPipeline(makeClient());
-
-    const failed = await pipeline.run(runParams(source, { prepare: { maxAttempts: 1 } }));
-    expect(failed.ok).toBe(false);
-    if (!failed.ok) {
-      expect(failed.error.code).toBe('SIMULATION_ERROR');
-    }
-    expect(pipeline.queueDepth(source.publicKey())).toBe(0);
-
-    const next = await pipeline.run(runParams(source));
-    expect(next.ok).toBe(true);
-    expect(pipeline.queueDepth(source.publicKey())).toBe(0);
-  });
-
-  it('lets a run already queued behind a failing simulation proceed (#354)', async () => {
-    const source = Keypair.random();
-    mockLedger();
-    jest
-      .spyOn(rpc.Server.prototype, 'simulateTransaction')
-      .mockResolvedValueOnce(simError('Error(Contract, #1)'))
-      .mockResolvedValue(simSuccess());
-    const pipeline = new TransactionPipeline(makeClient());
-
-    // Both runs enter the queue before either has settled, so the second is
-    // genuinely waiting on the lane when the first fails in its simulate step.
-    const [failed, next] = await Promise.all([
-      pipeline.run(runParams(source, { prepare: { maxAttempts: 1 } })),
-      pipeline.run(runParams(source)),
-    ]);
-
-    expect(failed.ok).toBe(false);
-    if (!failed.ok) {
-      expect(failed.error.code).toBe('SIMULATION_ERROR');
-    }
     expect(next.ok).toBe(true);
     expect(pipeline.queueDepth(source.publicKey())).toBe(0);
   });

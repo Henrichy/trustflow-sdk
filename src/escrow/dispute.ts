@@ -57,8 +57,6 @@ export async function disputeEscrow(
   return `tx_dispute_${params.escrowId}_${Date.now()}`;
 }
 
-import type { ContractConfig } from '../types/contract';
-
 /** Constructor options for {@link DisputeClient}. */
 export interface DisputeClientOptions {
   /** Per-request timeout (ms) applied to backend dispute calls. Falls back to `config.timeoutMs`. */
@@ -126,9 +124,9 @@ export class DisputeClient {
 
     this.http = createApiHttpClient({
       baseURL: this.apiUrl,
-      timeoutMs: options.timeoutMs ?? config.timeoutMs,
+      timeoutMs: options?.timeoutMs ?? config?.timeoutMs,
       retry: options.retry,
-      interceptors: options.interceptors ?? config.interceptors,
+      interceptors: options?.interceptors ?? config?.interceptors,
       additionalHeaders: {
         Authorization: `Bearer ${this.token}`,
       },

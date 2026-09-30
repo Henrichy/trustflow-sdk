@@ -1,32 +1,10 @@
-import { Account, Config, Contract, TransactionBuilder, rpc, BASE_FEE } from '@stellar/stellar-sdk';
-import type { Transaction } from '@stellar/stellar-sdk';
 import { ContractConfig } from '../types/contract';
 import { EscrowParams, EscrowState, SDKResult, GetGigsParams, GigsPage } from '../types/index';
-import { xlmToStroops, STELLAR_ADDRESS_RE, CONTRACT_ID_RE } from '../utils/validation';
-import {
-  assertStellarAddress,
-  isValidEscrowId,
-  xlmToStroops,
-  STELLAR_ADDRESS_RE,
-  CONTRACT_ID_RE,
-} from '../utils/validation';
+import { assertStellarAddress, isValidEscrowId, xlmToStroops, STELLAR_ADDRESS_RE, CONTRACT_ID_RE } from '../utils/validation';
 import { createApiHttpClient, toApiErrorMessage } from '../utils/http';
 import type { ApiRetryConfig } from '../utils/http';
 import type { HttpInterceptors } from '../utils/interceptors';
 import { buildCreateEscrowArgs, buildClaimArgs, buildFundArgs } from '../contract/build';
-import { CreateEscrowSchema, ReleaseEscrowSchema, ClaimEscrowSchema, FundEscrowSchema } from '../schemas';
-import { buildUnsignedTransaction, type UnsignedTx } from '../stellar/transaction';
-import { simulateTransaction } from '../contract/simulation';
-import { inspectTransactionSignatures } from '../stellar/transaction';
-import type { ParsedEvent } from '../events';
-import {
-  TypedEventEmitter,
-  mapContractEvent,
- type MilestoneEventHandler,
-  type MilestoneEventMap,
-  type MilestoneEventName,
-  type MilestoneWildcardHandler,
-} from './events';
 
 /** Per-call transport overrides for {@link TrustFlowEscrowClient.getGigs}. */
 export interface GetGigsOptions {
@@ -81,22 +59,6 @@ export class TrustFlowEscrowClient {
   private readonly timeoutMs?: number;
   private readonly retry?: ApiRetryConfig;
   private readonly interceptors?: HttpInterceptors;
-  private sorobanServerInstance?: rpc.Server;
-
-  /**
-   * Returns the shared Soroban RPC server, creating it on first use.
-   *
-   * Matches {@link import('../client').TrustFlowClient.getSorobanServer} so both
-   * clients connect the same way and a caller only configures `rpcUrl` once.
-   */
-  protected sorobanServer(): rpc.Server {
-    this.sorobanServerInstance ??= new rpc.Server(this.contractConfig.rpcUrl, {
-      allowHttp: Config.isAllowHttp(),
-    });
-    return this.sorobanServerInstance;
-  }
-  /** Typed emitter for milestone lifecycle events (#108). */
-  private readonly eventEmitter = new TypedEventEmitter();
 
   constructor(config: ContractConfig, options: TrustFlowEscrowClientOptions = {}) {
     this.contractConfig = config;
@@ -105,70 +67,6 @@ export class TrustFlowEscrowClient {
     this.timeoutMs = options.timeoutMs ?? config.timeoutMs;
     this.retry = options.retry;
     this.interceptors = options.interceptors;
-  }
-
-  /**
-   * Subscribe to a milestone lifecycle event. The event name determines
-   * the payload type at compile time, so TypeScript autocomplete enforces
-   * the correct payload shape. Pass `'*'` to receive every milestone
-   * event. Returns an unsubscribe function.
-   *
-   * @example
-   * ```typescript
-   * const unsub = client.on('milestone:funded', (payload) => {
-   *   console.log(payload.escrowId, payload.amountStroops);
-   * });
-   * unsub();
-   * ```
-   */
-  on<K extends keyof MilestoneEventMap>(
-    event: K,
-    handler: MilestoneEventHandler<K>,
-  ): () => void;
-  /** Subscribe to every milestone event via the `'*'` wildcard. */
-  on(event: '*', handler: MilestoneWildcardHandler): () => void;
-  on<K extends keyof MilestoneEventMap>(
-    event: K | '*',
-    handler: MilestoneEventHandler<K> | MilestoneWildcardHandler,
-  ): () => void {
-    return this.eventEmitter.on(event as K, handler as MilestoneEventHandler<K>);
-  }
-
-  /** Remove a previously registered milestone event handler. */
-  off<K extends keyof MilestoneEventMap>(
-    event: K,
-    handler: MilestoneEventHandler<K>,
-  ): void;
-  /** Remove a wildcard milestone event handler. */
-  off(event: '*', handler: MilestoneWildcardHandler): void;
-  off<K extends keyof MilestoneEventMap>(
-    event: K | '*',
-    handler: MilestoneEventHandler<K> | MilestoneWildcardHandler,
-  ): void {
-    this.eventEmitter.off(event as K, handler as MilestoneEventHandler<K>);
-  }
-
-  /**
-   * Feed a parsed contract event into the client. Milestone lifecycle
-   * events are translated to their SDK counterparts and emitted to
-   * subscribers. Events that are not milestone transitions are ignored.
-   */
-  emitContractEvent(event: ParsedEvent): void {
-    const mapped = mapContractEvent(event);
-    if (!mapped) {
-      return;
-    }
-    this.eventEmitter.emit(mapped.event, mapped.payload as MilestoneEventMap[keyof MilestoneEventMap]);
-  }
-
-  /**
-   * Convenience wrapper that feeds an array of parsed contract events
-   * into {@link emitContractEvent}.
-   */
-  emitContractEvents(events: readonly ParsedEvent[]): void {
-    for (const event of events) {
-      this.emitContractEvent(event);
-    }
   }
 
   /**
@@ -192,150 +90,14 @@ export class TrustFlowEscrowClient {
    * if (result.ok) console.log('Escrow ID:', result.data.escrowId);
    * ```
    */
-  /**
-   * Builds an **unsigned** `create_escrow` transaction and returns it as base64
-   * XDR, for air-gapped signing (issue #365).
-   *
-   * The returned envelope carries the sequence number, resource fee and auth
-   * entries produced by simulation, but **no signatures**. Export it, move it to
-   * an offline machine, sign it there, then hand the signed envelope to
-   * {@link broadcastSignedXDR}.
-   *
-   * Every failure is returned as `SDKResult` rather than thrown, matching the
-   * rest of this client.
-   *
-   * @param params - Escrow parameters, as passed to {@link createEscrow}
-   * @returns `{ ok: true, data: { xdr, networkPassphrase } }` on success,
-   *   `{ ok: false, error }` on validation, encoding, account-fetch or
-   *   simulation failure
-   *
-   * @example
-   * ```typescript
-   * const built = await client.buildUnsignedEscrowTransaction(params);
-   * if (!built.ok) throw new Error(built.error);
-   * // write built.data.xdr to disk, transfer to the signing machine,
-   * // sign offline, then: await broadcastSignedXDR(signed, horizonUrl);
-   * ```
-   */
-  async buildUnsignedEscrowTransaction(
-    params: EscrowParams,
-  ): Promise<SDKResult<{ xdr: string; networkPassphrase: string }>> {
-    try {
-      assertStellarAddress(params.depositor, 'depositor');
-      assertStellarAddress(params.beneficiary, 'beneficiary');
-    } catch (e) {
-      return { ok: false, error: String(e instanceof Error ? e.message : e) };
-    }
-
-    const amountStroops = xlmToStroops(params.amountXLM);
-    if (amountStroops <= 0n) {
-      return { ok: false, error: 'Amount must be positive' };
-    }
-
-    let args: unknown[];
-    try {
-      args = buildCreateEscrowArgs({
-        sender: params.depositor,
-        recipient: params.beneficiary,
-        amountStroops,
-        durationBlocks: params.deadlineBlocks,
-      });
-    } catch (e) {
-      return { ok: false, error: `Failed to encode escrow arguments: ${String(e)}` };
-    }
-
-    const contract = new Contract(this.contractConfig.contractId);
-
-    // The sequence number has to come from the network, since a cold-storage
-    // signer is by definition not holding a live account sequence.
-    let account: Account;
-    try {
-      account = await this.sorobanServer().getAccount(params.depositor);
-    } catch (e) {
-      return {
-        ok: false,
-        error: `Failed to load depositor account from RPC: ${
-          e instanceof Error ? e.message : String(e)
-        }`,
-      };
-    }
-
-    const sequenced = new TransactionBuilder(account, {
-      fee: BASE_FEE,
-      networkPassphrase: this.contractConfig.networkPassphrase,
-    })
-      .addOperation(contract.call('create_escrow', ...(args as never[])))
-      .setTimeout(30)
-      .build();
-
-    let prepared: Transaction;
-    try {
-      // Simulation supplies the Soroban auth entries and resource fee. Without
-      // them the envelope would be unsubmitable, so a simulation failure is a
-      // hard error rather than a warning.
-      const simulation = await simulateTransaction(
-        this.sorobanServer(),
-        sequenced,
-        { timeoutMs: this.timeoutMs },
-        this.retry,
-      );
-      if (!simulation.success) {
-        return {
-          ok: false,
-          error: `Escrow transaction simulation failed: ${
-            simulation.error ?? 'unknown reason'
-          }`,
-        };
-      }
-      prepared = rpc.assembleTransaction(sequenced, {
-        transactionData: simulation.transactionData ?? '',
-        events: [],
-        minResourceFee: simulation.minResourceFee ?? '0',
-        result: { retval: simulation.returnValue },
-      } as never).build();
-    } catch (e) {
-      return {
-        ok: false,
-        error: `Failed to assemble escrow transaction: ${
-          e instanceof Error ? e.message : String(e)
-        }`,
-      };
-    }
-
-    const built = prepared.toXDR();
-    // Defensive: an "unsigned" envelope that already carries a signature would
-    // make the offline-signing workflow ambiguous, so verify via the same
-    // inspection used before broadcast.
-    if (inspectTransactionSignatures(built).signed) {
-      return {
-        ok: false,
-        error: 'Built transaction is unexpectedly already signed',
-      };
-    }
-
-    return {
-      ok: true,
-      data: { xdr: built, networkPassphrase: this.contractConfig.networkPassphrase },
-    };
-  }
-
   async createEscrow(
     params: EscrowParams,
   ): Promise<SDKResult<{ escrowId: string; txHash: string }>> {
+    assertStellarAddress(params.depositor, 'depositor');
+    assertStellarAddress(params.beneficiary, 'beneficiary');
     const amountStroops = xlmToStroops(params.amountXLM);
-
-    const validation = CreateEscrowSchema.safeParse({
-      sender: params.depositor,
-      recipient: params.beneficiary,
-      amount: amountStroops,
-      network: this.contractConfig.network ?? 'TESTNET',
-    });
-
-    if (!validation.success) {
-      const fieldErrors = Object.entries(validation.error.flatten().fieldErrors)
-        .map(([field, msgs]) => `${field}: ${msgs?.join(', ')}`)
-        .join('; ');
-      return { ok: false, error: `Validation failed: ${fieldErrors}` };
+    if (amountStroops <= 0n) {
+      return { ok: false, error: 'Amount must be positive' };
     }
 
     let args: unknown[];
@@ -358,81 +120,6 @@ export class TrustFlowEscrowClient {
   }
 
   /**
-   * Builds an unsigned escrow transaction for offline signing.
-   *
-   * This is the first half of the air-gapped signing workflow: it returns a
-   * bundle of contract metadata plus a base64 XDR envelope, with no signature
-   * and no network call. A cold-storage host signs the `xdr`, and the signed
-   * result is handed to `broadcastSignedXDR` from a networked machine.
-   *
-   * Every argument is validated with the same rules as
-   * {@link TrustFlowEscrowClient.createEscrow} — a malformed address or a
-   * non-positive amount is rejected here rather than surfacing as an opaque
-   * encoding failure at the signing host.
-   *
-   * @param params - Escrow parameters
-   * @param sourceAccount - Account that will sign the envelope
-   * @returns The unsigned envelope bundle, or an error consistent with the
-   *   other client methods (no exceptions are thrown)
-   *
-   * @example
-   * ```typescript
-   * const built = client.buildUnsignedEscrowTransaction(params, 'GDEPOSITOR...');
-   * if (built.ok) {
-   *   // Hand built.data.xdr to an offline signer.
-   *   const signedXdr = await coldStorageSigner.sign(built.data.xdr);
-   *   await broadcastSignedXDR(signedXdr, horizonUrl);
-   * }
-   * ```
-   */
-  buildUnsignedEscrowTransaction(
-    params: EscrowParams,
-    sourceAccount: string,
-  ): SDKResult<UnsignedTx> {
-    assertStellarAddress(params.depositor, 'depositor');
-    assertStellarAddress(params.beneficiary, 'beneficiary');
-    assertStellarAddress(sourceAccount, 'sourceAccount');
-
-    const amountStroops = xlmToStroops(params.amountXLM);
-    if (amountStroops <= 0n) {
-      return { ok: false, error: 'Amount must be positive' };
-    }
-
-    let args: unknown[];
-    try {
-      args = buildCreateEscrowArgs({
-        sender: params.depositor,
-        recipient: params.beneficiary,
-        amountStroops,
-        durationBlocks: params.deadlineBlocks,
-      });
-    } catch (e) {
-      return { ok: false, error: `Failed to encode escrow arguments: ${String(e)}` };
-    }
-
-    try {
-      // The encoded arguments are carried in the method descriptor rather than
-      // inside the envelope, so a signing host can verify what it is signing
-      // before it ever touches key material.
-      const unsigned = buildUnsignedTransaction(
-        Buffer.from(args.length.toString()).toString('base64'),
-        this.contractConfig.networkPassphrase,
-        '100',
-        sourceAccount,
-        this.contractConfig.contractId,
-        'create_escrow',
-      );
-      return { ok: true, data: unsigned };
-    } catch (e) {
-      return {
-        ok: false,
-        error:
-          e instanceof Error ? e.message : `Failed to build unsigned transaction: ${String(e)}`,
-      };
-    }
-  }
-
-  /**
    * Claims (withdraws) funds from an escrow that has already cleared for release.
    *
    * Unlike `releaseEscrow` — called by the depositor/authoriser to move funds to
@@ -451,16 +138,10 @@ export class TrustFlowEscrowClient {
    * ```
    */
   async claim(escrowId: string, claimantAddress: string): Promise<SDKResult<{ txHash: string }>> {
-    const validation = ClaimEscrowSchema.safeParse({
-      escrowId,
-      claimant: claimantAddress,
-    });
-    if (!validation.success) {
-      const fieldErrors = Object.entries(validation.error.flatten().fieldErrors)
-        .map(([field, msgs]) => `${field}: ${msgs?.join(', ')}`)
-        .join('; ');
-      return { ok: false, error: `Validation failed: ${fieldErrors}` };
+    if (!isValidEscrowId(escrowId)) {
+      return { ok: false, error: 'escrowId is required' };
     }
+    assertStellarAddress(claimantAddress, 'claimantAddress');
 
     let args: unknown[];
     try {
@@ -488,7 +169,7 @@ export class TrustFlowEscrowClient {
    *
    * @example
    * ```typescript
-   * const result = await client.fund('esc-123', wallet.publicKey, 50_000_000n, USD_CONTRACT_ID);
+   * const result = await client.fund('esc-123', wallet.publicKey, 50_000_000n, USDC_CONTRACT_ID);
    * if (result.ok) console.log('Funded! tx:', result.data.txHash);
    * ```
    */
@@ -498,17 +179,12 @@ export class TrustFlowEscrowClient {
     amountStroops: bigint,
     tokenAddress?: string,
   ): Promise<SDKResult<{ txHash: string }>> {
-    const validation = FundEscrowSchema.safeParse({
-      escrowId,
-      funder: funderAddress,
-      amountStroops,
-      tokenAddress,
-    });
-    if (!validation.success) {
-      const fieldErrors = Object.entries(validation.error.flatten().fieldErrors)
-        .map(([field, msgs]) => `${field}: ${msgs?.join(', ')}`)
-        .join('; ');
-      return { ok: false, error: `Validation failed: ${fieldErrors}` };
+    if (!isValidEscrowId(escrowId)) {
+      return { ok: false, error: 'escrowId is required' };
+    }
+    assertStellarAddress(funderAddress, 'funderAddress');
+    if (amountStroops <= 0n) {
+      return { ok: false, error: 'Amount must be positive' };
     }
 
     let args: unknown[];
@@ -544,17 +220,10 @@ export class TrustFlowEscrowClient {
     escrowId: string,
     releaserAddress: string,
   ): Promise<SDKResult<{ txHash: string }>> {
-    const validation = ReleaseEscrowSchema.safeParse({
-      escrowId,
-      caller: releaserAddress,
-      network: this.contractConfig.network ?? 'TESTNET',
-    });
-    if (!validation.success) {
-      const fieldErrors = Object.entries(validation.error.flatten().fieldErrors)
-        .map(([field, msgs]) => `${field}: ${msgs?.join(', ')}`)
-        .join('; ');
-      return { ok: false, error: `Validation failed: ${fieldErrors}` };
+    if (!isValidEscrowId(escrowId)) {
+      return { ok: false, error: 'escrowId is required' };
     }
+    assertStellarAddress(releaserAddress, 'releaserAddress');
     return { ok: true, data: { txHash: `release-${escrowId}-${Date.now()}` } };
   }
 
@@ -640,30 +309,25 @@ export class TrustFlowEscrowClient {
       query.set('beneficiary', params.beneficiary);
     }
     if (params.tokenAddress) {
-      if (
-        !STELLAR_ADDRESS_RE.test(params.tokenAddress) &&
-        !CONTRACT_ID_RE.test(params.tokenAddress)
-      ) {
+      if (!STELLAR_ADDRESS_RE.test(params.tokenAddress) && !CONTRACT_ID_RE.test(params.tokenAddress)) {
         return { ok: false, error: `Invalid tokenAddress: "${params.tokenAddress}"` };
       }
       query.set('tokenAddress', params.tokenAddress);
     }
     if (params.createdAfter !== undefined) {
-      const dateStr =
-        params.createdAfter instanceof Date
-          ? params.createdAfter.toISOString()
-          : typeof params.createdAfter === 'number'
-            ? new Date(params.createdAfter).toISOString()
-            : String(params.createdAfter);
+      const dateStr = params.createdAfter instanceof Date
+        ? params.createdAfter.toISOString()
+        : typeof params.createdAfter === 'number'
+          ? new Date(params.createdAfter).toISOString()
+          : String(params.createdAfter);
       query.set('createdAfter', dateStr);
     }
     if (params.createdBefore !== undefined) {
-      const dateStr =
-        params.createdBefore instanceof Date
-          ? params.createdBefore.toISOString()
-          : typeof params.createdBefore === 'number'
-            ? new Date(params.createdBefore).toISOString()
-            : String(params.createdBefore);
+      const dateStr = params.createdBefore instanceof Date
+        ? params.createdBefore.toISOString()
+        : typeof params.createdBefore === 'number'
+          ? new Date(params.createdBefore).toISOString()
+          : String(params.createdBefore);
       query.set('createdBefore', dateStr);
     }
     if (params.minAmount !== undefined) {
@@ -680,16 +344,21 @@ export class TrustFlowEscrowClient {
     }
 
     const http = createApiHttpClient({
-      baseUrl: this.contractConfig.apiBaseUrl,
+      baseURL: this.contractConfig.apiBaseUrl,
+      apiKey: this.contractConfig.apiKey,
       timeoutMs: options.timeoutMs ?? this.timeoutMs,
       retry: options.retry ?? this.retry,
-      interceptors: options.interceptors ?? this.interceptors,
+      // Per-call overrides win, then the constructor option, then the
+      // contract-wide hooks.
+      interceptors: options.interceptors ?? this.interceptors ?? this.contractConfig.interceptors,
     });
 
     try {
-      const response = await http.get<GigsPage>(`/gigs?${query.toString()}`);
-      return { ok: true, data: response };
-    } catch (err) {
+      const response = await http.get<GigsPage>('/gigs', {
+        params: Object.fromEntries(query.entries()),
+      });
+      return { ok: true, data: response.data };
+    } catch (err: unknown) {
       return { ok: false, error: toApiErrorMessage(err) };
     }
   }

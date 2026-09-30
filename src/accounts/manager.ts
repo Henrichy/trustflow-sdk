@@ -1,3 +1,4 @@
+import { Keypair } from '@stellar/stellar-sdk';
 import { TrustFlowError } from '../errors';
 import { isValidStellarAddress } from '../utils/validation';
 import type {
@@ -46,7 +47,103 @@ export class AccountManager {
    */
   private readonly idByAddress = new Map<string, string>();
   private readonly listeners = new Set<AccountChangeListener>();
+  private readonly eventListeners = new Map<string, Set<(...args: any[]) => void>>();
   private currentActiveId: string | null = null;
+  private keypair: Keypair | null = null;
+
+
+  /**
+   * Returns the currently configured Keypair, or null if none is set.
+   */
+  getKeypair(): Keypair | null {
+    return this.keypair;
+  }
+
+  /**
+   * Updates the internal keypair reference, sets it as active, and notifies
+   * registered 'accountChanged' listeners with the new public key.
+   *
+   * @param keypair - Stellar Keypair instance
+   */
+  setKeypair(keypair: Keypair): void {
+    if (!keypair || typeof keypair.publicKey !== 'function') {
+      throw TrustFlowError.validation('keypair', 'Expected a valid Keypair instance');
+    }
+    this.keypair = keypair;
+    const newPublicKey = keypair.publicKey();
+
+    this.add({
+      address: newPublicKey,
+      id: newPublicKey,
+      label: 'Active Keypair',
+      activate: true,
+    });
+
+    this.emit('accountChanged', newPublicKey);
+  }
+
+  /**
+   * Subscribes a listener to account manager events (e.g. 'accountChanged').
+   * Returns an unsubscribe function.
+   *
+   * @param event - Event name
+   * @param listener - Callback function
+   * @returns Unsubscribe cleanup function
+   */
+  on(event: 'accountChanged', listener: (newPublicKey: string) => void): () => void;
+  on(event: string, listener: (...args: any[]) => void): () => void;
+  on(event: string, listener: (...args: any[]) => void): () => void {
+    if (!this.eventListeners.has(event)) {
+      this.eventListeners.set(event, new Set());
+    }
+    this.eventListeners.get(event)!.add(listener);
+
+    return () => {
+      this.off(event, listener);
+    };
+  }
+
+  /**
+   * Unsubscribes a listener from account manager events.
+   */
+  off(event: string, listener: (...args: any[]) => void): void {
+    const set = this.eventListeners.get(event);
+    if (set) {
+      set.delete(listener);
+      if (set.size === 0) {
+        this.eventListeners.delete(event);
+      }
+    }
+  }
+
+  /**
+   * EventEmitter-compatible addListener alias for on().
+   */
+  addListener(event: string, listener: (...args: any[]) => void): this {
+    this.on(event, listener);
+    return this;
+  }
+
+  /**
+   * EventEmitter-compatible removeListener alias for off().
+   */
+  removeListener(event: string, listener: (...args: any[]) => void): this {
+    this.off(event, listener);
+    return this;
+  }
+
+  /**
+   * Removes all registered event listeners.
+   */
+  removeAllListeners(event?: string): this {
+    if (event) {
+      this.eventListeners.delete(event);
+    } else {
+      this.eventListeners.clear();
+      this.listeners.clear();
+    }
+    return this;
+  }
 
   /** Number of registered accounts. */
   get size(): number {
@@ -393,12 +490,27 @@ export class AccountManager {
     });
   }
 
-  private emit(event: AccountChangeEvent): void {
-    for (const listener of this.listeners) {
-      try {
-        listener(event);
-      } catch {
-        // A failing listener must not roll back an account change.
+  emit(event: string, ...args: any[]): void;
+  emit(event: AccountChangeEvent): void;
+  emit(eventOrName: string | AccountChangeEvent, ...args: any[]): void {
+    if (typeof eventOrName === 'string') {
+      const listeners = this.eventListeners.get(eventOrName);
+      if (listeners) {
+        for (const listener of [...listeners]) {
+          try {
+            listener(...args);
+          } catch {
+            // A failing listener must not roll back execution
+          }
+        }
+      }
+    } else {
+      for (const listener of this.listeners) {
+        try {
+          listener(eventOrName);
+        } catch {
+          // A failing listener must not roll back an account change.
+        }
       }
     }
   }

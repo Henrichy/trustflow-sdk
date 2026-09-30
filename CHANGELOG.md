@@ -2,19 +2,6 @@
 
 ## [Unreleased]
 
-### Batch simulation (#368)
-
-- Issue #368: Added `simulateBatch` and `client.simulateBatch` to simulate envelopes and read invocations with one JSON-RPC array request, matching responses by ID and isolating individual failures.
-### Ledger hardware wallet (#362)
-
-- Issue #362: Added `LedgerWalletProvider` with WebHID connection, Stellar BIP-44 accounts, device-reviewed transaction signing, verified signatures, and mock-transport tests.
-### ⚠️ Breaking Changes
-
-- Issue #350: i128/u128 conversion helpers now throw `TrustFlowError` with code `INVALID_AMOUNT` instead of `RangeError` for invalid amounts. Decimal string bounds are checked before BigInt conversion; valid signed negatives remain supported. See [UPGRADING.md](docs/UPGRADING.md#i128u128-amount-validation-unreleased) for error-handler migration.
-### Pipeline queue release on simulation failures (#354)
-
-- Issue #354: `TransactionPipeline.run` now proves it releases its per-account queue slot when a transaction fails in the simulate step, so later runs for the same account proceed instead of hanging behind a stuck lane. Restored `simulate`/`prepare` to assemble from the parsed RPC response, which the shared simulation helper had reduced in a way that dropped the Soroban auth entries and broke every run after the first.
-
 ### Wallet SEP-0007 transaction URIs (#379)
 
 - Issue #379: Added `generateSep7Uri` for mobile wallet deep links and QR payloads, with SEP-0007 parameter encoding and URI size validation.

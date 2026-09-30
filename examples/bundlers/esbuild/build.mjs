@@ -3,8 +3,8 @@
  *
  * ## The point of this file
  *
- * esbuild has no Node polyfills either: for `platform: 'browser'` it refuses
- * to resolve a Node built-in unless the bundle explicitly declares it, and it
+ * esbuild has no Node polyfills either: for `platform: 'browser'` it refuses to
+ * resolve a Node built-in unless the bundle explicitly declares it, and it
  * resolves the `browser` export condition, so `@stellar/stellar-sdk` resolves to
  * its prebundled browser build.
  *

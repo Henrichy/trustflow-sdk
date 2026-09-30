@@ -79,13 +79,7 @@ export async function readContractState(
     .setTimeout(30)
     .build();
 
-  const result = await simulateTransaction(
-    server,
-    tx,
-    options,
-    client.retryConfig,
-    client.tracerProvider,
-  );
+  const result = await simulateTransaction(server, tx, options, client.retryConfig);
 
   if (!result.success) {
     if (result.needsRestore) {

@@ -1,11 +1,9 @@
-import { rpc, Transaction, scValToNative, SorobanDataBuilder } from '@stellar/stellar-sdk';
+import { rpc, Transaction, scValToNative } from '@stellar/stellar-sdk';
 import { TrustFlowError } from '../errors';
 import { withTransientRetry } from '../utils/node-retry';
 import { logger } from '../utils/logger';
 import type { ReadContractStateOptions } from './read';
 import type { ApiRetryConfig } from '../utils/http';
-import type { TracerProvider } from '@opentelemetry/api';
-import { getSdkTracer, markSpanError, withSdkSpan } from '../utils/tracing';
 
 /**
  * Result of simulating a transaction against Soroban RPC.
@@ -19,22 +17,18 @@ export interface SimulationOutcome {
   success: boolean;
   cost: { cpuInsns: string; memBytes: string };
   returnValue?: unknown;
-  /** Parsed RPC host-function result needed when assembling signed invocations. */
-  result?: rpc.Api.SimulateHostFunctionResult;
-  /** Original parsed response for callers that need the complete RPC shape. */
-  response?: rpc.Api.SimulateTransactionResponse;
   error?: string;
   /** True when the simulation needs expired ledger entries restored before it can succeed. */
   needsRestore?: boolean;
   /** The restore preamble the RPC returned, when `needsRestore` is true. */
   restorePreamble?: {
     minResourceFee: string;
-    transactionData: SorobanDataBuilder;
+    transactionData: any;
   };
   /** The RPC-reported minimum resource fee (stroops), when available. */
   minResourceFee?: string;
-  /** The Soroban transaction data builder needed for `rpc.assembleTransaction`. */
-  transactionData?: SorobanDataBuilder;
+  /** The raw Soroban transaction data (base64 XDR) needed for `rpc.assembleTransaction`. */
+  transactionData?: any;
 }
 
 /**
@@ -63,58 +57,57 @@ export async function simulateTransaction(
   tx: Transaction,
   options: { timeoutMs?: number; retry?: ReadContractStateOptions['retry'] } = {},
   retryConfig?: ApiRetryConfig,
-  tracerProvider?: TracerProvider,
 ): Promise<SimulationOutcome> {
-  return withSdkSpan(
-    getSdkTracer(tracerProvider),
-    'trustflow.rpc.simulate',
-    { 'rpc.system': 'stellar', 'rpc.method': 'simulateTransaction' },
-    async (span) => {
-      try {
-        const result = await withTransientRetry(
-          () => server.simulateTransaction(tx),
-          { ...options.retry, timeoutMs: options.timeoutMs },
-          retryConfig,
-          'rpc.simulateTransaction',
-        );
+  try {
+    const result = await withTransientRetry(
+      () => server.simulateTransaction(tx),
+      { ...options.retry, timeoutMs: options.timeoutMs },
+      retryConfig,
+      'rpc.simulateTransaction',
+    );
 
-        if (rpc.Api.isSimulationError(result)) {
-          logger.warn('Contract simulation returned error', { error: result.error });
-          markSpanError(span, result.error);
-          return { success: false, cost: { cpuInsns: '0', memBytes: '0' }, error: result.error };
-        }
+    if (rpc.Api.isSimulationError(result)) {
+      logger.warn('Contract simulation returned error', { error: result.error });
+      const cost = (result as any).cost ?? { cpuInsns: '0', memBytes: '0' };
+      return {
+        success: false,
+        cost: {
+          cpuInsns: String(cost.cpuInsns ?? '0'),
+          memBytes: String(cost.memBytes ?? '0'),
+        },
+        error: result.error,
+      };
+    }
 
-        if (rpc.Api.isSimulationRestore(result)) {
-          logger.warn('Contract simulation requires restore preamble');
-          span.setAttribute('stellar.simulation.needs_restore', true);
-          markSpanError(span, 'Simulation requires restore preamble');
-          return {
-            success: false,
-            cost: { cpuInsns: '0', memBytes: '0' },
-            error: 'Simulation requires restore preamble',
-            needsRestore: true,
-            restorePreamble: result.restorePreamble,
-          };
-        }
+    if (rpc.Api.isSimulationRestore(result)) {
+      logger.warn('Contract simulation requires restore preamble');
+      return {
+        success: false,
+        cost: { cpuInsns: '0', memBytes: '0' },
+        error: 'Simulation requires restore preamble',
+        needsRestore: true,
+        restorePreamble: result.restorePreamble,
+      };
+    }
 
-        const retval = result.result?.retval;
-        logger.debug('Contract simulation succeeded');
-        return {
-          success: true,
-          cost: { cpuInsns: '0', memBytes: '0' },
-          returnValue: retval ? scValToNative(retval) : undefined,
-          result: result.result,
-          response: result,
-          minResourceFee: result.minResourceFee,
-          transactionData: result.transactionData,
-        };
-      } catch (e) {
-        // A `TIMEOUT` (or any typed SDK error) keeps its code rather than being
-        // re-wrapped as a generic simulation failure.
-        if (e instanceof TrustFlowError) throw e;
-        logger.error('Contract simulation failed', { error: e });
-        throw new TrustFlowError('Simulation failed', 'SIMULATION_ERROR', e);
-      }
-    },
-  );
+    const retval = result.result?.retval;
+    logger.debug('Contract simulation succeeded');
+    const cost = (result as any).cost ?? { cpuInsns: '0', memBytes: '0' };
+    return {
+      success: true,
+      cost: {
+        cpuInsns: String(cost.cpuInsns ?? '0'),
+        memBytes: String(cost.memBytes ?? '0'),
+      },
+      returnValue: retval ? scValToNative(retval) : undefined,
+      minResourceFee: result.minResourceFee,
+      transactionData: result.transactionData,
+    };
+  } catch (e) {
+    // A `TIMEOUT` (or any typed SDK error) keeps its code rather than being
+    // re-wrapped as a generic simulation failure.
+    if (e instanceof TrustFlowError) throw e;
+    logger.error('Contract simulation failed', { error: e });
+    throw new TrustFlowError('Simulation failed', 'SIMULATION_ERROR', e);
+  }
 }

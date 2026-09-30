@@ -1,27 +1,6 @@
 export { TrustFlowEscrowClient } from './client';
 export type { GetGigsOptions, TrustFlowEscrowClientOptions } from './client';
-export {
-  TypedEventEmitter,
-  mapContractEvent,
-} from './events';
-export type {
-  MilestoneEventName,
-  MilestoneEventMap,
-  MilestoneEventHandler,
-  MilestoneWildcardHandler,
-  MilestoneEventNameOrWildcard,
-  MilestoneFundedPayload,
-  MilestoneReleasedPayload,
-  DisputeOpenedPayload,
-} from './events';
 export { EscrowBuilder } from './builder';
-export type {
-  EscrowBuilderMilestone,
-  EscrowBuilderArbitration,
-  EscrowBuilderConfig,
-  EscrowBuilderJSON,
-  EscrowBuilderInvocationParams,
-} from './builder';
 export { EscrowMonitor } from './monitor';
 export type {
   EscrowMonitorOnError,

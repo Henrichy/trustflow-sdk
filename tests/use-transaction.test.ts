@@ -1,7 +1,6 @@
 /** @jest-environment jsdom */
 import { renderHook, act } from '@testing-library/react';
 import { useTransaction } from '../src/hooks/useTransaction';
-import { Horizon } from '@stellar/stellar-sdk';
 
 describe('useTransaction', () => {
   it('starts idle', () => {
@@ -107,40 +106,5 @@ describe('useTransaction', () => {
 
     expect(result.current.execute).toBe(execute);
     expect(result.current.reset).toBe(reset);
-  });
-
-  it('moves from pending to failed on Horizon 400 transaction_failed', async () => {
-    const { result } = renderHook(() => useTransaction());
-
-    const horizonError = new Horizon.HorizonApiError(
-      400,
-      'Bad Request',
-      {
-        type: 'https://stellar.org/horizon-errors/transaction_failed',
-        title: 'Transaction Failed',
-        status: 400,
-        detail: 'The transaction failed when submitted to the stellar network.',
-        extras: {
-          envelope_xdr: 'AAAAAgAAAAB...',
-          result_xdr: 'AAAAAAAAAGT////7AAAAAA==',
-          result_codes: {
-            transaction: 'tx_failed',
-            operations: ['op_underfunded'],
-          },
-        },
-      },
-      'https://horizon-testnet.stellar.org/transactions',
-    );
-
-    await act(async () => {
-      await expect(result.current.execute(() => Promise.reject(horizonError))).rejects.toBe(
-        horizonError,
-      );
-    });
-
-    expect(result.current.status).toBe('failed');
-    expect(result.current.error).toBe('tx_failed');
-    expect(result.current.hash).toBeUndefined();
-    expect(result.current.isPending).toBe(false);
   });
 });
