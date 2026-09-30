@@ -6,6 +6,9 @@
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "trustflow-inspect": "./dist/node/cli.js"
+  },
   "sideEffects": false,
   "exports": {
     ".": {
@@ -52,7 +55,7 @@
     "url": "git+https://github.com/Chidubemkingsley/trustflow-sdk.git"
   },
   "bugs": {
-    "url": "https://github.com/Chidubemkingsley/trustflow-sdk/issues"
+    "url": "https://github.com/Chidubemkingsley/trustflow-sdk/Issues"
   },
   "homepage": "https://github.com/Chidubemkingsley/trustflow-sdk#readme",
   "keywords": [
@@ -137,6 +140,7 @@
     "eslint": "^10.5.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-prettier": "^5.5.6",
+    "fast-check": "^4.10.2",
     "globals": "^17.6.0",
     "jest": "^30.4.2",
     "jest-environment-jsdom": "^30.4.2",

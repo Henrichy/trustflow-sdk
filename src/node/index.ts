@@ -12,3 +12,14 @@ export {
   destroyPoolAgent,
 } from '../utils/connection-pool';
 export { TrustFlowError } from '../errors';
+export {
+  inspectXdr,
+  formatInspectedResult,
+} from './inspect';
+export type {
+  InspectedArgument,
+  InspectedAuthEntry,
+  InspectedInvocation,
+  InspectedOperation,
+  InspectedResult,
+} from './inspect';

@@ -28,7 +28,6 @@ import type {
   SubmittableTransaction,
 } from './types';
 import { logger } from '../utils/logger';
-import { simulateTransaction } from '../contract/simulation';
 
 const DEFAULT_RETRY_POLICY: Required<Omit<RetryPolicy, 'timeoutMs'>> = {
   maxAttempts: 3,
@@ -304,41 +303,35 @@ export class TransactionPipeline {
     tx: Transaction,
     options?: RetryPolicy,
   ): Promise<PipelineResult<rpc.Api.SimulateTransactionResponse>> {
-    const outcome = await withRetry(
-      () => simulateTransaction(this.server, tx, options, this.client.retryConfig),
+    const response = await withRetry(
+      () => this.server.simulateTransaction(tx),
       options,
       'simulate',
       this.client.timeoutMs,
     );
-    if (!outcome.ok) {
-      if (outcome.error.code === 'RETRY_EXHAUSTED') {
+    if (!response.ok) {
+      if (response.error.code === 'RETRY_EXHAUSTED') {
         return fail(
           TrustFlowError.simulationFailed(
             'simulateTransaction request failed',
-            outcome.error.cause,
+            response.error.cause,
           ),
         );
       }
-      return fail(outcome.error);
+      return response;
     }
-    if (!outcome.data.success) {
-      if (outcome.data.needsRestore) {
-        return fail(
-          TrustFlowError.simulationFailed(
-            'simulation requires restore preamble',
-            outcome.data.restorePreamble,
-          ),
-        );
-      }
-      return fail(TrustFlowError.simulationFailed(outcome.data.error ?? 'unknown simulation error'));
+    if (rpc.Api.isSimulationError(response.data)) {
+      return fail(TrustFlowError.simulationFailed(response.data.error));
     }
-    // Reconstruct a minimal success response for callers that need the raw RPC shape
-    return ok({
-      transactionData: outcome.data.transactionData ?? '',
-      events: [],
-      minResourceFee: outcome.data.minResourceFee ?? '0',
-      result: { retval: outcome.data.returnValue as any },
-    } as unknown as rpc.Api.SimulateTransactionResponse);
+    if (rpc.Api.isSimulationRestore(response.data)) {
+      return fail(
+        TrustFlowError.simulationFailed(
+          'simulation requires restore preamble',
+          response.data.restorePreamble,
+        ),
+      );
+    }
+    return ok(response.data);
   }
 
   /**
@@ -418,30 +411,31 @@ export class TransactionPipeline {
     this.pipelineLogger.debug('Preparing transaction', { resourceFeeMultiplier: multiplier });
     return withRetry(
       async () => {
-        const simulation = await simulateTransaction(this.server, tx, options, this.client.retryConfig);
-        if (!simulation.success) {
-          if (simulation.needsRestore) {
-            throw TrustFlowError.simulationFailed(
-              'simulation requires restore preamble',
-              simulation.restorePreamble,
-            );
-          }
-          throw TrustFlowError.simulationFailed(simulation.error ?? 'unknown simulation error');
+        // Assemble from the *parsed* RPC response: `rpc.assembleTransaction`
+        // needs the full success shape (the Soroban data builder, its auth
+        // entries and the `_parsed` marker), which the shared
+        // `simulateTransaction` helper deliberately reduces to a decoded
+        // outcome. Rebuilding it here would drop the auth entries and make the
+        // SDK re-parse a response that only carries `results` when raw.
+        const simulation = await this.server.simulateTransaction(tx);
+        if (rpc.Api.isSimulationError(simulation)) {
+          throw TrustFlowError.simulationFailed(simulation.error);
+        }
+        if (rpc.Api.isSimulationRestore(simulation)) {
+          throw TrustFlowError.simulationFailed(
+            'simulation requires restore preamble',
+            simulation.restorePreamble,
+          );
         }
 
         // `assembleTransaction` reads the resource fee off `transactionData`
         // itself (not `minResourceFee`), so the headroom must be written
         // onto the SorobanTransactionData builder for it to take effect.
-        const minFee = Number(simulation.minResourceFee ?? '0');
-        const paddedFee = Math.ceil(minFee * multiplier).toString();
+        const paddedFee = Math.ceil(Number(simulation.minResourceFee) * multiplier).toString();
+        simulation.transactionData.setResourceFee(paddedFee);
         this.pipelineLogger.debug('Transaction prepared', { paddedFee, minResourceFee: simulation.minResourceFee });
 
-        return rpc.assembleTransaction(tx, {
-          transactionData: simulation.transactionData ?? '',
-          events: [],
-          minResourceFee: paddedFee,
-          result: { retval: simulation.returnValue as any },
-        } as any).build();
+        return rpc.assembleTransaction(tx, { ...simulation, minResourceFee: paddedFee }).build();
       },
       options,
       'prepare',

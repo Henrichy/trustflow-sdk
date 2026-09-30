@@ -9,8 +9,8 @@ import {
     buildVoteArgs,
 } from '../src/contract/build';
 
-const ADDR_A = Keypair.random().publicKey();
-const ADDR_B = Keypair.random().publicKey();
+const ADDRA = Keypair.random().publicKey();
+const ADDRB = Keypair.random().publicKey();
 
 describe('contract argument XDR payloads', () => {
     it('buildCreateEscrowArgs returns XDR-decodable ScVal values', () => {
@@ -47,7 +47,7 @@ describe('contract argument XDR payloads', () => {
     });
 
     it('buildFundArgs includes the token address when provided', () => {
-        const args = buildFundArgs('escrow-1', ADDR_A, 50_000_000n, ADDR_B);
+        const args = buildFundArgs('escrow-1', ADDR_A, 50_000_000n*, ADDR_B);
 
         expect(args).toHaveLength(4);
         args.forEach((value) => expect(value).toBeValidScVal());

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Pipeline queue release on simulation failures (#354)
+
+- Issue #354: `TransactionPipeline.run` now proves it releases its per-account queue slot when a transaction fails in the simulate step, so later runs for the same account proceed instead of hanging behind a stuck lane. Restored `simulate`/`prepare` to assemble from the parsed RPC response, which the shared simulation helper had reduced in a way that dropped the Soroban auth entries and broke every run after the first.
+
 ### Wallet SEP-0007 transaction URIs (#379)
 
 - Issue #379: Added `generateSep7Uri` for mobile wallet deep links and QR payloads, with SEP-0007 parameter encoding and URI size validation.

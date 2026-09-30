@@ -1,4 +1,5 @@
 import type { StellarAddress, EscrowId, TxHash, SDKResult } from './index';
+import type { TrustFlowError } from '../errors';
 
 /** A juror's decision on a dispute. */
 export type VoteChoice = 'approve' | 'reject' | 'abstain';
@@ -37,6 +38,13 @@ export interface CastVoteResult {
   disputeId: EscrowId;
   jurorAddress: StellarAddress;
   encrypted: boolean;
+  /** IPFS dispute round metadata, when available. */
+  metadata?: Record<string, unknown>;
+  /**
+   * Typed error describing why metadata could not be loaded, when it
+   * couldn't. The vote itself still succeeds.
+   */
+  metadataError?: TrustFlowError;
 }
 
 export type CastVoteSDKResult = SDKResult<CastVoteResult>;
