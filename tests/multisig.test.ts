@@ -55,7 +55,7 @@ function baseTransaction(): TransactionBuilder {
         amount: '10',
       }),
     )
-    .setTimeout(30);
+    .setTimeout(0);
 }
 
 function makeClient(options?: ConstructorParameters<typeof MultiSigEscrowClient>[1]) {
@@ -478,7 +478,7 @@ describe('MultiSigEscrowClient against the real client', () => {
     // `addSignature` trusts the claimed signer: no transaction-hash comparison
     // and no signature-to-address binding. #280 owns the fix; this test
     // documents the gap and starts passing with it.
-    it.failing('rejects an envelope signed by someone other than the claimed signer (#280)', () => {
+    it('rejects an envelope signed by someone other than the claimed signer (#280)', () => {
       const client = makeClient();
       const operationId = initOperation(client, { threshold: 2 });
       addSignature(client, operationId, signers.a);
@@ -588,7 +588,7 @@ describe('MultiSigEscrowClient against the real client', () => {
 
       expect(client.getAssembledXdr(operationId)).toEqual({
         ok: false,
-        error: 'No signatures collected yet',
+        error: 'No verified signatures collected yet',
       });
     });
 
@@ -631,7 +631,10 @@ describe('MultiSigEscrowClient against the real client', () => {
       const client = makeClient();
       const operationId = initOperation(client, { threshold: 1 });
       // Both signers submit byte-identical envelopes.
-      const shared = signedXdrFor(signers.a);
+      const tx = baseTransaction().build();
+      tx.sign(signers.a);
+      tx.sign(signers.b);
+      const shared = tx.toEnvelope().toXDR('base64');
       expect(
         client.addSignature({
           operationId,
@@ -652,7 +655,7 @@ describe('MultiSigEscrowClient against the real client', () => {
       expect(result.ok).toBe(true);
       if (!result.ok) throw new Error(result.error);
       const envelope = xdr.TransactionEnvelope.fromXDR(result.data.xdr, 'base64');
-      expect(envelope.v1().signatures()).toHaveLength(1);
+      expect(envelope.v1().signatures()).toHaveLength(2);
     });
 
     it('assembles onto a fee-bump base envelope', () => {
@@ -729,7 +732,7 @@ describe('MultiSigEscrowClient against the real client', () => {
 
       expect(result).toEqual({
         ok: false,
-        error: 'Threshold not met: need 1 more signature(s) before submission',
+        error: 'Threshold not met: need 1 more verified signature(s) before submission',
       });
       expect(submitTransactionMock).not.toHaveBeenCalled();
     });

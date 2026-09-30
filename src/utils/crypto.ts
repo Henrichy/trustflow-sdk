@@ -19,8 +19,10 @@ export function randomBytes(length: number): Uint8Array {
 
   // 2. Fallback to Node.js crypto module if available
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const nodeCrypto = require('crypto');
+    const modName = 'crypto';
+    // Dynamic lookup avoids bundlers attempting to package Node's crypto into browser builds
+    const req = typeof require !== 'undefined' ? require : undefined;
+    const nodeCrypto = req ? req(modName) : undefined;
     if (typeof nodeCrypto?.randomBytes === 'function') {
       return new Uint8Array(nodeCrypto.randomBytes(length));
     }

@@ -89,41 +89,6 @@ export const DisputeEscrowSchema = z.object({
   network: NetworkSchema.default('TESTNET'),
 });
 
-/** Validates the input to `escrow.claim()`. */
-export const ClaimEscrowSchema = z.object({
-  escrowId: z.string().min(1),
-  claimant: StellarAddressSchema,
-});
-
-/** Validates the input to `escrow.fund()`. */
-export const FundEscrowSchema = z.object({
-  escrowId: z.string().min(1),
-  funder: StellarAddressSchema,
-  amountStroops: StroopsSchema,
-  tokenAddress: ContractIdSchema.optional(),
-});
-
-// ── Juror ─────────────────────────────────────────────────────────────────────
-
-/** Validates the input to `juror.vote()`. */
-export const VotePayloadSchema = z.object({
-  encrypted: z.boolean(),
-  choice: z.string().optional(),
-  ciphertext: z.string().base64().min(1).optional(),
-}).refine(data => {
-  if (data.encrypted) {
-    return !!data.ciphertext;
-  } else {
-    return !!data.choice;
-  }
-}, { message: 'Must provide ciphertext for encrypted votes, or choice for plaintext votes' });
-
-export const VoteSchema = z.object({
-  disputeId: z.string().min(1),
-  jurorAddress: StellarAddressSchema,
-  vote: VotePayloadSchema,
-});
-
 // ── Client config ─────────────────────────────────────────────────────────────
 
 /** Validates the config object passed to `new TrustFlowClient(...)`. */
@@ -136,7 +101,6 @@ export const ClientConfigSchema = z.object({
   apiBaseUrl: z.string().url('API base URL must be a valid URL').optional(),
   apiKey: z.string().optional(),
   apiVersion: z.string().optional(),
-  tracerProvider: z.any().optional(),
   balanceCache: z
     .object({
       ttlMs: z.number().positive().optional(),
@@ -165,9 +129,6 @@ export const ClientConfigSchema = z.object({
 export type CreateEscrowInput = z.infer<typeof CreateEscrowSchema>;
 export type ReleaseEscrowInput = z.infer<typeof ReleaseEscrowSchema>;
 export type DisputeEscrowInput = z.infer<typeof DisputeEscrowSchema>;
-export type ClaimEscrowInput = z.infer<typeof ClaimEscrowSchema>;
-export type FundEscrowInput = z.infer<typeof FundEscrowSchema>;
-export type VoteInput = z.infer<typeof VoteSchema>;
 export type ClientConfig = z.infer<typeof ClientConfigSchema>;
 export type StellarAddress = z.infer<typeof StellarAddressSchema>;
 export type ContractId = z.infer<typeof ContractIdSchema>;
@@ -196,7 +157,9 @@ export function parseRpcResponse<T extends z.ZodTypeAny>(
     throw new TrustFlowError(
       `RPC response for "${context}" failed schema validation`,
       'VALIDATION_ERROR',
-      { context, issues: result.error.issues },
+      undefined,
+      context,
+      result.error.issues,
     );
   }
   return result.data;

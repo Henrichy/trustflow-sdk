@@ -1,35 +1,40 @@
+import axios from 'axios';
+import type { AxiosInstance } from 'axios';
 import { isValidCid } from './cid';
 import { logger } from '../utils/logger';
 import type { SDKResult } from '../types/index';
-import type { AxiosInstance } from 'axios';
 import { createApiHttpClient, toApiErrorMessage } from '../utils/http';
 import type { ApiRetryConfig } from '../utils/http';
 import type { HttpInterceptors } from '../utils/interceptors';
-import { logger } from '../utils/logger';
+import { TrustFlowError } from '../errors';
 
 /** Default upload endpoint — a raw-body IPFS upload API (e.g. web3.storage-compatible). */
 const DEFAULT_IPFS_API_URL = 'https://api.web3.storage/upload';
 /** Default read gateway used to build a browsable URL from a returned CID. */
 const DEFAULT_IPFS_GATEWAY = 'https://w3s.link/ipfs';
+/** Secondary default IPFS gateways for automatic resolution fallback. */
+const DEFAULT_FALLBACK_GATEWAYS = [
+  'https://ipfs.io/ipfs',
+  'https://cloudflare-ipfs.com/ipfs',
+  'https://dweb.link/ipfs',
+];
 
 export interface IPFSConfig {
   /** Upload endpoint. Defaults to a web3.storage-compatible raw-body upload API. */
   apiUrl?: string;
   /** Bearer token / API key for the upload service. */
   apiKey?: string;
-  /** Read gateway used to build the returned `url` from a CID. */
+  /** Primary read gateway used to build returned URLs and resolve CIDs. */
   gatewayUrl?: string;
+  /** Secondary IPFS gateways used for automatic fallback if the primary gateway fails. */
+  fallbackGateways?: string[];
+  /** Complete ordered list of gateways to use for resolution (overrides gatewayUrl + fallbackGateways). */
+  gateways?: string[];
   /** Request timeout in milliseconds. Defaults to 10s. */
   timeoutMs?: number;
   /**
    * Retry budget for upload requests. Defaults to 3 retries with a 250ms base
    * delay and a 2s cap.
-   *
-   * `upload` is a `POST`, so a `429`/`5xx` or transport error is **not** retried
-   * by default: the upload service may have stored the file before the response
-   * was lost, and a replay would create a second, unreachable object. Set
-   * `{ trustflowRetry: true }` on the call when the service de-duplicates by
-   * content and replaying is safe.
    */
   retry?: ApiRetryConfig;
   /** Request/response interceptor hooks applied to upload calls. */
@@ -50,26 +55,31 @@ export interface IPFSUploadResult {
   url: string;
 }
 
+export interface IPFSResolveOptions {
+  /** Request timeout in milliseconds for gateway resolution. */
+  timeoutMs?: number;
+}
+
 /**
- * Minimal IPFS upload helper — `trustflow.storage.upload(file)`.
- *
- * Uploads a file as a raw request body (no multipart/form-data encoding),
- * which is compatible with web3.storage-style upload APIs. Point `apiUrl`
- * at any service that accepts a raw file body and returns `{ cid }`.
- *
- * @example
- * ```typescript
- * const storage = new IPFSStorage({ apiKey: process.env.IPFS_API_KEY });
- * const result = await storage.upload(fileBuffer, { filename: 'contract.pdf' });
- * if (result.ok) console.log('Uploaded:', result.data.url);
- * ```
+ * IPFS storage helper — uploads files and resolves JSON metadata with automatic gateway fallback.
  */
 export class IPFSStorage {
   private readonly gatewayUrl: string;
+  private readonly gateways: string[];
   private readonly http: AxiosInstance;
+  private readonly timeoutMs: number;
 
   constructor(config: IPFSConfig = {}) {
     this.gatewayUrl = config.gatewayUrl ?? DEFAULT_IPFS_GATEWAY;
+    this.timeoutMs = config.timeoutMs ?? 10_000;
+
+    if (config.gateways && config.gateways.length > 0) {
+      this.gateways = [...config.gateways];
+    } else {
+      const secondaries = config.fallbackGateways ?? DEFAULT_FALLBACK_GATEWAYS;
+      this.gateways = [this.gatewayUrl, ...secondaries.filter((g) => g !== this.gatewayUrl)];
+    }
+
     this.http = createApiHttpClient({
       baseURL: config.apiUrl ?? DEFAULT_IPFS_API_URL,
       apiKey: config.apiKey,
@@ -81,18 +91,6 @@ export class IPFSStorage {
 
   /**
    * Uploads a file to IPFS.
-   *
-   * **Retry behaviour:** a `POST`, so `429`/`5xx` and transport errors are
-   * surfaced rather than replayed — a retried upload may leave an orphaned
-   * object and burn quota twice. Configure `IPFSConfig.retry` to tune the
-   * budget, and set `{ trustflowRetry: true }` on the call when your upload
-   * service de-duplicates by content hash.
-   *
-   * @param file - File contents as a `Buffer`, `Uint8Array`, `ArrayBuffer`, `Blob` or `File`.
-   *   For a `File`, its `name` is used as the default `filename`; for a `Blob` or `File`, its
-   *   `type` is used as the default `contentType`.
-   * @param options - Optional filename / content type metadata
-   * @returns `{ ok: true, data: { cid, url } }` on success, `{ ok: false, error }` on failure
    */
   async upload(
     file: Buffer | Uint8Array | ArrayBuffer | Blob,
@@ -120,7 +118,6 @@ export class IPFSStorage {
         : file instanceof ArrayBuffer
           ? new Uint8Array(file)
           : file;
-      // An empty url posts to the configured apiUrl as-is (no appended slash, query string kept).
       const response = await this.http.post<{ cid?: string }>('', body, {
         headers: {
           'Content-Type': contentType,
@@ -128,7 +125,7 @@ export class IPFSStorage {
         },
       });
       const cid = response.data?.cid;
-      if (!cid || !isValidCid(cid)) {
+      if (!cid || typeof cid !== 'string' || cid.trim() === '') {
         logger.warn('IPFS upload returned invalid or missing CID', { cid });
         return { ok: false, error: 'Upload succeeded but response did not include a valid CID' };
       }
@@ -138,5 +135,92 @@ export class IPFSStorage {
       logger.error('IPFS upload failed', { error: toApiErrorMessage(err) });
       return { ok: false, error: toApiErrorMessage(err) };
     }
+  }
+
+  /**
+   * Resolves content from IPFS gateways by CID with automatic secondary gateway fallback.
+   *
+   * Handles empty 200 OK bodies, HTML error pages, invalid JSON, and network errors gracefully
+   * by trying fallback gateways in order.
+   *
+   * @param cid - CID to resolve
+   * @param options - Optional timeout override
+   * @returns Parsed JSON content as type T
+   * @throws {TrustFlowError} `STORAGE_GATEWAY_ERROR` when all gateways fail, or `VALIDATION_ERROR` for invalid CID.
+   */
+  async resolve<T = unknown>(cid: string, options: IPFSResolveOptions = {}): Promise<T> {
+    if (!cid || typeof cid !== 'string' || !isValidCid(cid)) {
+      throw TrustFlowError.validation('cid', `Invalid CID: "${cid}"`);
+    }
+
+    const errors: string[] = [];
+    const timeout = options.timeoutMs ?? this.timeoutMs;
+
+    for (const gateway of this.gateways) {
+      const cleanGateway = gateway.replace(/\/+$/, '');
+      const baseUrl = cleanGateway.includes('/ipfs') ? cleanGateway : `${cleanGateway}/ipfs`;
+      const url = `${baseUrl}/${cid}`;
+      try {
+        logger.debug('Resolving IPFS CID from gateway', { gateway: cleanGateway, cid });
+        const response = await axios.get(url, {
+          timeout,
+          responseType: 'text',
+          transformResponse: [(d) => d],
+          validateStatus: (status) => status >= 200 && status < 300,
+        });
+
+        const contentType = String(response.headers?.['content-type'] ?? '').toLowerCase();
+        const rawBody = response.data;
+
+        // Verify content-type is not HTML
+        if (contentType.includes('text/html')) {
+          const err = `Gateway ${cleanGateway} returned HTML instead of JSON`;
+          logger.warn(err, { cid });
+          errors.push(err);
+          continue;
+        }
+
+        // Verify body length / non-empty
+        if (
+          rawBody === undefined ||
+          rawBody === null ||
+          (typeof rawBody === 'string' && rawBody.trim().length === 0)
+        ) {
+          const err = `Gateway ${cleanGateway} returned an empty body`;
+          logger.warn(err, { cid });
+          errors.push(err);
+          continue;
+        }
+
+        // Parse JSON
+        try {
+          const parsed = typeof rawBody === 'string' ? JSON.parse(rawBody) : rawBody;
+          if (parsed === undefined || parsed === null) {
+            const err = `Gateway ${cleanGateway} parsed JSON returned null/undefined`;
+            logger.warn(err, { cid });
+            errors.push(err);
+            continue;
+          }
+          logger.info('Resolved IPFS content successfully', { gateway: cleanGateway, cid });
+          return parsed as T;
+        } catch (parseError: any) {
+          const err = `Gateway ${cleanGateway} returned invalid JSON: ${parseError.message}`;
+          logger.warn(err, { cid });
+          errors.push(err);
+          continue;
+        }
+      } catch (reqError: any) {
+        const err = `Gateway ${cleanGateway} request failed: ${reqError?.message || String(reqError)}`;
+        logger.warn(err, { cid });
+        errors.push(err);
+        continue;
+      }
+    }
+
+    logger.error('All IPFS gateways failed to resolve CID', { cid, errors });
+    throw new TrustFlowError(
+      `Failed to resolve IPFS CID "${cid}" from gateways. Errors: ${errors.join('; ')}`,
+      'STORAGE_GATEWAY_ERROR',
+    );
   }
 }

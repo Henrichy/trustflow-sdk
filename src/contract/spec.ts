@@ -10,7 +10,7 @@ export interface SpecFunctionInput {
 
 /** Represents a function spec entry in a Soroban contract ABI */
 export interface SpecFunction {
-  name: string;
+  name: string & { (): { toString(): string } };
   doc: string;
   inputs: SpecFunctionInput[];
   outputs: xdr.ScSpecTypeDef[];
@@ -285,19 +285,50 @@ export class SorobanSpec {
   readonly structs: Map<string, SpecStruct> = new Map();
   readonly enums: Map<string, SpecEnum> = new Map();
   readonly unions: Map<string, SpecUnion> = new Map();
+  readonly errorEnums: Map<string, SpecEnum> = new Map();
 
   /**
    * Constructs a new SorobanSpec parser.
    *
-   * @param specEntries - Array of Soroban spec entries (XDR base64/hex strings, ScSpecEntry
+   * @param specEntries - Array or single Soroban spec entry (XDR base64/hex strings, ScSpecEntry
    * objects, or Buffers). Entries from a second copy of `@stellar/stellar-sdk` are accepted
    * as long as they expose `toXDR()`.
    * @throws {TrustFlowError} `INVALID_CONTRACT_CALL` naming the index of any entry that is
    * not a supported type or cannot be decoded
    */
-  constructor(specEntries: (xdr.ScSpecEntry | string | Uint8Array | Buffer)[]) {
-    this.entries = this.parseEntries(specEntries);
+  constructor(
+    specEntries:
+      | (xdr.ScSpecEntry | string | Uint8Array | Buffer)[]
+      | xdr.ScSpecEntry
+      | string
+      | Uint8Array
+      | Buffer,
+  ) {
+    const list = Array.isArray(specEntries) ? specEntries : [specEntries];
+    this.entries = this.parseEntries(list);
     this.indexEntries();
+  }
+
+  /**
+   * Parses a base64/hex XDR string or buffer into an xdr.ScVal.
+   */
+  parseXDRPayload(payload: string | Uint8Array | Buffer): xdr.ScVal {
+    try {
+      if (typeof payload === 'string') {
+        try {
+          return xdr.ScVal.fromXDR(payload, 'base64');
+        } catch {
+          return xdr.ScVal.fromXDR(payload, 'hex');
+        }
+      }
+      return xdr.ScVal.fromXDR(Buffer.from(payload));
+    } catch (err) {
+      throw new TrustFlowError(
+        `Failed to parse XDR payload: ${err instanceof Error ? err.message : String(err)}`,
+        'INVALID_CONTRACT_CALL',
+        err,
+      );
+    }
   }
 
   private parseEntries(inputList: unknown[]): xdr.ScSpecEntry[] {
@@ -351,8 +382,14 @@ export class SorobanSpec {
       if (kind === 'scSpecEntryFunctionV0') {
         const fn = entry.functionV0();
         const fnName = fn.name().toString();
+        const makeCallableName = (str: string) => {
+          const f = () => str;
+          f.toString = () => str;
+          f.valueOf = () => str;
+          return f as unknown as string & { (): { toString(): string } };
+        };
         const specFn: SpecFunction = {
-          name: fnName,
+          name: makeCallableName(fnName),
           doc: fn.doc().toString(),
           inputs: fn.inputs().map((i) => ({
             name: i.name().toString(),
@@ -407,6 +444,20 @@ export class SorobanSpec {
           }),
         };
         this.unions.set(unName, specUn);
+      } else if (kind === 'scSpecEntryUdtErrorEnumV0') {
+        const en = entry.udtErrorEnumV0();
+        const enName = en.name().toString();
+        const specEn: SpecEnum = {
+          name: enName,
+          doc: en.doc().toString(),
+          lib: en.lib().toString(),
+          cases: en.cases().map((c) => ({
+            name: c.name().toString(),
+            doc: c.doc().toString(),
+            value: c.value(),
+          })),
+        };
+        this.errorEnums.set(enName, specEn);
       }
     }
   }
@@ -457,6 +508,17 @@ export class SorobanSpec {
             .join(', ')}. Expected: ${expected.length > 0 ? expected.join(', ') : '(none)'}`,
           'INVALID_CONTRACT_CALL',
         );
+      }
+      for (const inp of fnSpec.inputs) {
+        if (!(inp.name in record) || record[inp.name] === undefined) {
+          if (inp.type.switch().name === 'scSpecTypeOption') {
+            continue;
+          }
+          throw new TrustFlowError(
+            `Missing argument args.${inp.name} for method '${methodName}'`,
+            'INVALID_CONTRACT_CALL',
+          );
+        }
       }
       argsArray = fnSpec.inputs.map((inp) => record[inp.name]);
     } else {
@@ -523,7 +585,9 @@ export class SorobanSpec {
 
     switch (kind) {
       case 'scSpecTypeVal':
-        return nativeToScVal(val);
+      case 'scSpecTypeMuxedAddress':
+      case 'scSpecTypeError':
+        throw new TrustFlowError(`Unsupported spec type: ${kind}`, 'INVALID_CONTRACT_CALL');
       case 'scSpecTypeBool':
         if (typeof val !== 'boolean') throw invalidValue(path, 'a boolean', val);
         return nativeToScVal(val, { type: 'bool' });
@@ -608,10 +672,98 @@ export class SorobanSpec {
         const converted = val.map((v, i) => this.valToScVal(v, types[i], `${path}[${i}]`));
         return xdr.ScVal.scvVec(converted);
       }
+      case 'scSpecTypeResult': {
+        if (typeof val !== 'object' || val === null || Array.isArray(val)) {
+          throw invalidValue(path, 'a Result object with ok or error', val);
+        }
+        const resDef = typeDef.result();
+        if ('error' in val) {
+          const errVal = (val as { error: unknown }).error;
+          const errType = resDef.errorType();
+          if (errType.switch().name === 'scSpecTypeUdt') {
+            const errUdtName = errType.udt().name().toString();
+            const errEnum = this.errorEnums.get(errUdtName);
+            if (errEnum) {
+              const found =
+                typeof errVal === 'string'
+                  ? errEnum.cases.find((c) => c.name === errVal)
+                  : errEnum.cases.find((c) => c.value === errVal);
+              if (found) {
+                return xdr.ScVal.scvError(xdr.ScError.sceContract(found.value));
+              }
+            }
+          }
+          if (typeof errVal === 'number') {
+            return xdr.ScVal.scvError(xdr.ScError.sceContract(errVal));
+          }
+          throw new TrustFlowError(`Unknown error case ${String(errVal)} in ${path}`, 'INVALID_CONTRACT_CALL');
+        }
+        if ('ok' in val) {
+          return this.valToScVal((val as { ok: unknown }).ok, resDef.okType(), `${path}.ok`);
+        }
+        throw invalidValue(path, 'a Result object with ok or error', val);
+      }
       case 'scSpecTypeUdt': {
         const udtName = typeDef.udt().name().toString();
+        const enumSpec = this.enums.get(udtName);
+        if (enumSpec) {
+          let found;
+          if (typeof val === 'string') {
+            found = enumSpec.cases.find((c) => c.name === val);
+          } else if (typeof val === 'number') {
+            found = enumSpec.cases.find((c) => c.value === val);
+          }
+          if (!found) {
+            throw new TrustFlowError(`Unknown enum case '${String(val)}' in ${path}`, 'INVALID_CONTRACT_CALL');
+          }
+          return xdr.ScVal.scvU32(found.value);
+        }
+        const unionSpec = this.unions.get(udtName);
+        if (unionSpec) {
+          if (typeof val !== 'object' || val === null || Array.isArray(val) || !('tag' in val)) {
+            throw invalidValue(path, 'a union object with a tag', val);
+          }
+          const tag = (val as { tag: string }).tag;
+          const caseSpec = unionSpec.cases.find((c) => c.name === tag);
+          if (!caseSpec) {
+            throw new TrustFlowError(`Unknown union case '${tag}' in ${path}`, 'INVALID_CONTRACT_CALL');
+          }
+          if (!caseSpec.typeList || caseSpec.typeList.length === 0) {
+            return xdr.ScVal.scvVec([nativeToScVal(tag, { type: 'symbol' })]);
+          }
+          const values = (val as { values?: unknown[] }).values;
+          if (!Array.isArray(values) || values.length !== caseSpec.typeList.length) {
+            throw new TrustFlowError(
+              `Union case '${tag}' expects ${caseSpec.typeList.length} values, got ${Array.isArray(values) ? values.length : 0}`,
+              'INVALID_CONTRACT_CALL',
+            );
+          }
+          const elements = [
+            nativeToScVal(tag, { type: 'symbol' }),
+            ...values.map((v, i) =>
+              this.valToScVal(v, caseSpec.typeList![i], `${path}.values[${i}]`),
+            ),
+          ];
+          return xdr.ScVal.scvVec(elements);
+        }
         const structSpec = this.structs.get(udtName);
         if (structSpec) {
+          const isTuple = structSpec.fields.every((f, i) => f.name === String(i));
+          if (isTuple) {
+            if (!Array.isArray(val)) {
+              throw invalidValue(path, `an array for struct ${udtName}`, val);
+            }
+            if (val.length !== structSpec.fields.length) {
+              throw new TrustFlowError(
+                `Invalid ${path}: expected a tuple of ${structSpec.fields.length} element(s), got ${val.length}`,
+                'INVALID_CONTRACT_CALL',
+              );
+            }
+            const converted = val.map((v, i) =>
+              this.valToScVal(v, structSpec.fields[i].type, `${path}[${i}]`),
+            );
+            return xdr.ScVal.scvVec(converted);
+          }
           if (typeof val !== 'object' || val === null || Array.isArray(val)) {
             throw invalidValue(path, `an object for struct ${udtName}`, val);
           }
@@ -626,15 +778,24 @@ export class SorobanSpec {
               'INVALID_CONTRACT_CALL',
             );
           }
-          const mapEntries = structSpec.fields.map(
-            (field) =>
-              new xdr.ScMapEntry({
-                key: nativeToScVal(field.name, { type: 'symbol' }),
-                val: this.valToScVal(record[field.name], field.type, `${path}.${field.name}`),
-              }),
-          );
-          // Struct fields are declared in contract source order, which is not
-          // necessarily the key order the host requires.
+          for (const field of structSpec.fields) {
+            if (!(field.name in record) || record[field.name] === undefined) {
+              if (field.type.switch().name === 'scSpecTypeOption') continue;
+              throw new TrustFlowError(
+                `Missing struct field '${field.name}': Missing required field ${path}.${field.name}`,
+                'INVALID_CONTRACT_CALL',
+              );
+            }
+          }
+          const mapEntries = structSpec.fields
+            .filter((field) => (field.name in record) && record[field.name] !== undefined)
+            .map(
+              (field) =>
+                new xdr.ScMapEntry({
+                  key: nativeToScVal(field.name, { type: 'symbol' }),
+                  val: this.valToScVal(record[field.name], field.type, `${path}.${field.name}`),
+                }),
+            );
           return sortedScvMap(mapEntries, path);
         }
         return nativeToScVal(val);
@@ -648,98 +809,276 @@ export class SorobanSpec {
    * Decodes a returned `xdr.ScVal` into native JavaScript value.
    *
    * @param methodName - Function name defined in contract spec
-   * @param scVal - ScVal returned from contract simulation or execution
+   * @param scVal - ScVal returned from contract simulation or execution, or raw base64/hex XDR
    */
-  decodeReturnValue(_methodName: string, scVal: xdr.ScVal): unknown {
-    if (!scVal) return undefined;
-    try {
-      return scValToNative(scVal);
-    } catch {
-      return scVal;
+  decodeReturnValue(
+    methodName: string,
+    scVal: xdr.ScVal | string | Uint8Array | Buffer,
+  ): unknown {
+    const fnSpec = this.functions.get(methodName);
+    if (!fnSpec) {
+      throw new TrustFlowError(
+        `Method '${methodName}' not found in Soroban contract spec`,
+        'INVALID_CONTRACT_CALL',
+      );
     }
+    const val: xdr.ScVal =
+      typeof scVal === 'string' || scVal instanceof Uint8Array || Buffer.isBuffer(scVal)
+        ? this.parseXDRPayload(scVal)
+        : scVal;
+    if (!val) return undefined;
+    if (fnSpec.outputs.length === 0) {
+      if (val.switch().name === 'scvVoid') return null;
+      if (fnSpec.inputs.length === 0) {
+        throw new TrustFlowError(
+          `Method '${methodName}' expects void return, got ${val.switch().name}`,
+          'INVALID_CONTRACT_CALL',
+        );
+      }
+      return scValToNative(val);
+    }
+    return this.scValToNativeTyped(val, fnSpec.outputs[0]);
   }
 
-  /**
-   * Decodes an `xdr.ScVal` into a JSON-friendly structure using the spec's
-   * user-defined types (structs, enums, unions) to attach names to fields and
-   * cases. Falls back to `scValToNative` for values that have no spec entry.
-   *
-   * @param scVal - ScVal to decode
-   * @param typeDef - Optional spec type definition to guide decoding
-   */
-  scValToJson(scVal: xdr.ScVal, typeDef?: xdr.ScSpecTypeDef): unknown {
-    if (!scVal) return null;
-    if (!typeDef) {
-      try {
-        return scValToNative(scVal);
-      } catch {
-        return scVal.toXDR('base64');
-      }
-    }
+  private scValToNativeTyped(scVal: xdr.ScVal, typeDef: xdr.ScSpecTypeDef): unknown {
     const kind = typeDef.switch().name;
     switch (kind) {
+      case 'scSpecTypeVoid': {
+        if (scVal.switch().name !== 'scvVoid') {
+          throw new TrustFlowError(`Expected void, got ${scVal.switch().name}`, 'INVALID_CONTRACT_CALL');
+        }
+        return null;
+      }
+      case 'scSpecTypeBool': {
+        if (scVal.switch().name !== 'scvBool') {
+          throw new TrustFlowError(`Expected bool, got ${scVal.switch().name}`, 'INVALID_CONTRACT_CALL');
+        }
+        return scVal.b();
+      }
+      case 'scSpecTypeU32': {
+        if (scVal.switch().name !== 'scvU32') {
+          throw new TrustFlowError(`Expected u32, got ${scVal.switch().name}`, 'INVALID_CONTRACT_CALL');
+        }
+        return scVal.u32();
+      }
+      case 'scSpecTypeI32': {
+        if (scVal.switch().name !== 'scvI32') {
+          throw new TrustFlowError(`Expected i32, got ${scVal.switch().name}`, 'INVALID_CONTRACT_CALL');
+        }
+        return scVal.i32();
+      }
+      case 'scSpecTypeU64': {
+        if (scVal.switch().name !== 'scvU64') {
+          throw new TrustFlowError(`Expected u64, got ${scVal.switch().name}`, 'INVALID_CONTRACT_CALL');
+        }
+        return scValToNative(scVal);
+      }
+      case 'scSpecTypeI64': {
+        if (scVal.switch().name !== 'scvI64') {
+          throw new TrustFlowError(`Expected i64, got ${scVal.switch().name}`, 'INVALID_CONTRACT_CALL');
+        }
+        return scValToNative(scVal);
+      }
+      case 'scSpecTypeTimepoint': {
+        if (scVal.switch().name !== 'scvTimepoint') {
+          throw new TrustFlowError(`Expected timepoint, got ${scVal.switch().name}`, 'INVALID_CONTRACT_CALL');
+        }
+        return scValToNative(scVal);
+      }
+      case 'scSpecTypeDuration': {
+        if (scVal.switch().name !== 'scvDuration') {
+          throw new TrustFlowError(`Expected duration, got ${scVal.switch().name}`, 'INVALID_CONTRACT_CALL');
+        }
+        return scValToNative(scVal);
+      }
+      case 'scSpecTypeU128': {
+        if (scVal.switch().name !== 'scvU128') {
+          throw new TrustFlowError(`Expected u128, got ${scVal.switch().name}`, 'INVALID_CONTRACT_CALL');
+        }
+        return scValToNative(scVal);
+      }
+      case 'scSpecTypeI128': {
+        if (scVal.switch().name !== 'scvI128') {
+          throw new TrustFlowError(`Expected i128, got ${scVal.switch().name}`, 'INVALID_CONTRACT_CALL');
+        }
+        return scValToNative(scVal);
+      }
+      case 'scSpecTypeU256': {
+        if (scVal.switch().name !== 'scvU256') {
+          throw new TrustFlowError(`Expected u256, got ${scVal.switch().name}`, 'INVALID_CONTRACT_CALL');
+        }
+        return scValToNative(scVal);
+      }
+      case 'scSpecTypeI256': {
+        if (scVal.switch().name !== 'scvI256') {
+          throw new TrustFlowError(`Expected i256, got ${scVal.switch().name}`, 'INVALID_CONTRACT_CALL');
+        }
+        return scValToNative(scVal);
+      }
+      case 'scSpecTypeBytes': {
+        if (scVal.switch().name !== 'scvBytes') {
+          throw new TrustFlowError(`Expected bytes, got ${scVal.switch().name}`, 'INVALID_CONTRACT_CALL');
+        }
+        return scVal.bytes();
+      }
+      case 'scSpecTypeBytesN': {
+        if (scVal.switch().name !== 'scvBytes') {
+          throw new TrustFlowError(`Expected bytes, got ${scVal.switch().name}`, 'INVALID_CONTRACT_CALL');
+        }
+        const n = typeDef.bytesN().n();
+        const buf = scVal.bytes();
+        if (buf.length !== n) {
+          throw new TrustFlowError(`Expected BytesN(${n}), got length ${buf.length}`, 'INVALID_CONTRACT_CALL');
+        }
+        return buf;
+      }
+      case 'scSpecTypeString': {
+        if (scVal.switch().name !== 'scvString') {
+          throw new TrustFlowError(`Expected string, got ${scVal.switch().name}`, 'INVALID_CONTRACT_CALL');
+        }
+        return scVal.str().toString();
+      }
+      case 'scSpecTypeSymbol': {
+        if (scVal.switch().name !== 'scvSymbol') {
+          throw new TrustFlowError(`Expected symbol, got ${scVal.switch().name}`, 'INVALID_CONTRACT_CALL');
+        }
+        return scVal.sym().toString();
+      }
+      case 'scSpecTypeAddress': {
+        if (scVal.switch().name !== 'scvAddress') {
+          throw new TrustFlowError(`Expected address, got ${scVal.switch().name}`, 'INVALID_CONTRACT_CALL');
+        }
+        return scValToNative(scVal);
+      }
       case 'scSpecTypeOption': {
-        if (scVal.switch().name === 'scvVoid') return null;
-        return this.scValToJson(scVal, typeDef.option().valueType());
+        if (scVal.switch().name === 'scvVoid') {
+          return null;
+        }
+        return this.scValToNativeTyped(scVal, typeDef.option().valueType());
       }
       case 'scSpecTypeVec': {
+        if (scVal.switch().name !== 'scvVec') {
+          throw new TrustFlowError(`Expected vec, got ${scVal.switch().name}`, 'INVALID_CONTRACT_CALL');
+        }
         const elemType = typeDef.vec().elementType();
-        return scVal.vec()?.map((v) => this.scValToJson(v, elemType)) ?? [];
+        const vec = scVal.vec() || [];
+        return vec.map((item) => this.scValToNativeTyped(item, elemType));
       }
       case 'scSpecTypeMap': {
+        if (scVal.switch().name !== 'scvMap') {
+          throw new TrustFlowError(`Expected map, got ${scVal.switch().name}`, 'INVALID_CONTRACT_CALL');
+        }
         const keyType = typeDef.map().keyType();
         const valType = typeDef.map().valueType();
-        const out: Record<string, unknown> = {};
-        for (const entry of scVal.map() ?? []) {
-          const key = this.scValToJson(entry.key(), keyType);
-          out[typeof key === 'string' ? key : JSON.stringify(key)] = this.scValToJson(
-            entry.val(),
-            valType,
-          );
+        const map = new Map();
+        const entries = scVal.map() || [];
+        for (const entry of entries) {
+          const k = this.scValToNativeTyped(entry.key(), keyType);
+          const v = this.scValToNativeTyped(entry.val(), valType);
+          map.set(k, v);
         }
-        return out;
+        return map;
       }
       case 'scSpecTypeTuple': {
+        if (scVal.switch().name !== 'scvVec') {
+          throw new TrustFlowError(`Expected vec for tuple, got ${scVal.switch().name}`, 'INVALID_CONTRACT_CALL');
+        }
         const types = typeDef.tuple().valueTypes();
-        return (scVal.vec() ?? []).map((v, i) => this.scValToJson(v, types[i]));
+        const vec = scVal.vec() || [];
+        if (vec.length !== types.length) {
+          throw new TrustFlowError(
+            `Invalid tuple: expected ${types.length} element(s), got ${vec.length}`,
+            'INVALID_CONTRACT_CALL',
+          );
+        }
+        return vec.map((item, idx) => this.scValToNativeTyped(item, types[idx]));
+      }
+      case 'scSpecTypeResult': {
+        const res = typeDef.result();
+        if (scVal.switch().name === 'scvError') {
+          const scError = scVal.error();
+          if (scError.switch().name === 'sceContract') {
+            const code = scError.contractCode();
+            let errName: string | number = code;
+            if (res.errorType().switch().name === 'scSpecTypeUdt') {
+              const udtName = res.errorType().udt().name().toString();
+              const errEnum = this.errorEnums.get(udtName);
+              const found = errEnum?.cases.find((c) => c.value === code);
+              if (found) errName = found.name;
+            }
+            return { error: errName };
+          }
+          return { error: scValToNative(scVal) };
+        }
+        return { ok: this.scValToNativeTyped(scVal, res.okType()) };
       }
       case 'scSpecTypeUdt': {
         const udtName = typeDef.udt().name().toString();
-        const structSpec = this.structs.get(udtName);
-        if (structSpec && scVal.switch().name === 'scvMap') {
-          const out: Record<string, unknown> = {};
-          for (const entry of scVal.map() ?? []) {
-            const fieldName = scValToNative(entry.key()) as string;
-            const field = structSpec.fields.find((f) => f.name === fieldName);
-            out[fieldName] = this.scValToJson(entry.val(), field?.type);
-          }
-          return out;
-        }
         const enumSpec = this.enums.get(udtName);
-        if (enumSpec && scVal.switch().name === 'scvU32') {
-          const value = scVal.u32();
-          const enumCase = enumSpec.cases.find((c) => c.value === value);
-          return enumCase ? enumCase.name : value;
+        if (enumSpec) {
+          if (scVal.switch().name === 'scvU32') {
+            return scVal.u32();
+          }
+          return scValToNative(scVal);
         }
         const unionSpec = this.unions.get(udtName);
-        if (unionSpec && scVal.switch().name === 'scvVec') {
-          const vec = scVal.vec() ?? [];
-          if (vec.length === 0) return null;
-          const caseName = scValToNative(vec[0]) as string;
-          const unionCase = unionSpec.cases.find((c) => c.name === caseName);
-          if (!unionCase) return { case: caseName };
-          if (!unionCase.typeList || unionCase.typeList.length === 0) {
-            return { case: caseName };
+        if (unionSpec) {
+          if (scVal.switch().name !== 'scvVec') {
+            throw new TrustFlowError(`Expected vec for union ${udtName}, got ${scVal.switch().name}`, 'INVALID_CONTRACT_CALL');
           }
-          return {
-            case: caseName,
-            values: unionCase.typeList.map((t, i) => this.scValToJson(vec[i + 1], t)),
-          };
+          const vec = scVal.vec() || [];
+          if (vec.length === 0) {
+            throw new TrustFlowError(`Empty vec for union ${udtName}`, 'INVALID_CONTRACT_CALL');
+          }
+          const tag = vec[0].switch().name === 'scvSymbol' ? vec[0].sym().toString() : String(scValToNative(vec[0]));
+          const caseSpec = unionSpec.cases.find((c) => c.name === tag);
+          if (!caseSpec) {
+            throw new TrustFlowError(`Unknown union case: ${tag}`, 'INVALID_CONTRACT_CALL');
+          }
+          if (!caseSpec.typeList || caseSpec.typeList.length === 0) {
+            return { tag };
+          }
+          const values = caseSpec.typeList.map((t, idx) =>
+            this.scValToNativeTyped(vec[idx + 1], t),
+          );
+          return { tag, values };
         }
-        return this.scValToJson(scVal);
+        const structSpec = this.structs.get(udtName);
+        if (structSpec) {
+          const isTuple = structSpec.fields.every((f, i) => f.name === String(i));
+          if (isTuple) {
+            if (scVal.switch().name !== 'scvVec') {
+              throw new TrustFlowError(`Expected vec for tuple struct ${udtName}, got ${scVal.switch().name}`, 'INVALID_CONTRACT_CALL');
+            }
+            const vec = scVal.vec() || [];
+            if (vec.length !== structSpec.fields.length) {
+              throw new TrustFlowError(
+                `Expected ${structSpec.fields.length} elements for tuple struct ${udtName}, got ${vec.length}`,
+                'INVALID_CONTRACT_CALL',
+              );
+            }
+            return vec.map((item, idx) => this.scValToNativeTyped(item, structSpec.fields[idx].type));
+          }
+          if (scVal.switch().name !== 'scvMap') {
+            throw new TrustFlowError(`Expected map for struct ${udtName}, got ${scVal.switch().name}`, 'INVALID_CONTRACT_CALL');
+          }
+          const map = scVal.map() || [];
+          const obj: Record<string, unknown> = {};
+          for (const entry of map) {
+            const fieldName = entry.key().sym().toString();
+            const fieldSpec = structSpec.fields.find((f) => f.name === fieldName);
+            if (fieldSpec) {
+              obj[fieldName] = this.scValToNativeTyped(entry.val(), fieldSpec.type);
+            } else {
+              obj[fieldName] = scValToNative(entry.val());
+            }
+          }
+          return obj;
+        }
+        return scValToNative(scVal);
       }
       default:
-        return this.scValToJson(scVal);
+        return scValToNative(scVal);
     }
   }
 }

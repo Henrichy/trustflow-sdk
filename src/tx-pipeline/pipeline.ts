@@ -28,8 +28,6 @@ import type {
   SubmittableTransaction,
 } from './types';
 import { logger } from '../utils/logger';
-import { simulateTransaction } from '../contract/simulation';
-import { installTraceContextInterceptor, withSdkSpan } from '../utils/tracing';
 
 const DEFAULT_RETRY_POLICY: Required<Omit<RetryPolicy, 'timeoutMs'>> = {
   maxAttempts: 3,
@@ -220,9 +218,6 @@ export class TransactionPipeline {
     // every stage's RPC calls are bounded by `withTimeout` in `withRetry`,
     // defaulting to the client-wide `ClientConfig.timeoutMs`.
     this.server = new rpc.Server(client.rpcUrl, { allowHttp: Config.isAllowHttp() });
-    installTraceContextInterceptor(
-      this.server.httpClient as unknown as import('axios').AxiosInstance,
-    );
   }
 
   /**
@@ -283,10 +278,7 @@ export class TransactionPipeline {
       this.pipelineLogger.debug('Transaction assembled', { sourceAccount: params.sourceAccount });
       return ok(builder.build());
     } catch (e) {
-      this.pipelineLogger.error('Transaction assembly failed', {
-        sourceAccount: params.sourceAccount,
-        error: e,
-      });
+      this.pipelineLogger.error('Transaction assembly failed', { sourceAccount: params.sourceAccount, error: e });
       return fail(
         TrustFlowError.assemblyFailed(
           `could not assemble transaction for ${params.sourceAccount}`,
@@ -311,86 +303,28 @@ export class TransactionPipeline {
     tx: Transaction,
     options?: RetryPolicy,
   ): Promise<PipelineResult<rpc.Api.SimulateTransactionResponse>> {
-    return withSdkSpan(
-      this.client.getTracer(),
-      'trustflow.tx.simulate',
-      {
-        'rpc.system': 'stellar',
-        'rpc.method': 'simulateTransaction',
-        'stellar.network': this.client.network,
-      },
-      async (span) => {
-        span.setAttribute('transaction.hash', tx.hash().toString('hex'));
-        const outcome = await withRetry(
-          () =>
-            simulateTransaction(
-              this.server,
-              tx,
-              options,
-              this.client.retryConfig,
-              this.client.tracerProvider,
-            ),
-          options,
-          'simulate',
-          this.client.timeoutMs,
-        );
-        if (!outcome.ok) {
-          if (outcome.error.code === 'RETRY_EXHAUSTED') {
-            return fail(
-              TrustFlowError.simulationFailed(
-                'simulateTransaction request failed',
-                outcome.error.cause,
-              ),
-            );
-          }
-          return fail(outcome.error);
-        }
-        if (!outcome.data.success) {
-          if (outcome.data.needsRestore) {
-            return fail(
-              TrustFlowError.simulationFailed(
-                'simulation requires restore preamble',
-                outcome.data.restorePreamble,
-              ),
-            );
-          }
-          return fail(
-            TrustFlowError.simulationFailed(outcome.data.error ?? 'unknown simulation error'),
-          );
-        }
-        // Preserve the full parsed RPC response for callers that need its auth/events metadata.
-        return ok(outcome.data.response as rpc.Api.SimulateTransactionResponse);
-      },
-    );
-    const response = await withRetry(
+    const outcome = await withRetry(
       () => this.server.simulateTransaction(tx),
       options,
       'simulate',
       this.client.timeoutMs,
     );
-    if (!response.ok) {
-      if (response.error.code === 'RETRY_EXHAUSTED') {
+    if (!outcome.ok) {
+      if (outcome.error.code === 'RETRY_EXHAUSTED') {
         return fail(
           TrustFlowError.simulationFailed(
             'simulateTransaction request failed',
-            response.error.cause,
+            outcome.error.cause,
           ),
         );
       }
-      return response;
+      return fail(outcome.error);
     }
-    if (rpc.Api.isSimulationError(response.data)) {
-      return fail(TrustFlowError.simulationFailed(response.data.error));
+    const response = outcome.data;
+    if (rpc.Api.isSimulationError(response)) {
+      return fail(TrustFlowError.simulationFailed(response.error));
     }
-    if (rpc.Api.isSimulationRestore(response.data)) {
-      return fail(
-        TrustFlowError.simulationFailed(
-          'simulation requires restore preamble',
-          response.data.restorePreamble,
-        ),
-      );
-    }
-    return ok(response.data);
+    return ok(response);
   }
 
   /**
@@ -465,71 +399,11 @@ export class TransactionPipeline {
    * @param options - Resource fee multiplier and retry policy
    */
   async prepare(tx: Transaction, options?: PrepareOptions): Promise<PipelineResult<Transaction>> {
-    return withSdkSpan(
-      this.client.getTracer(),
-      'trustflow.tx.prepare',
-      {
-        'rpc.system': 'stellar',
-        'rpc.method': 'simulateTransaction',
-        'stellar.network': this.client.network,
-      },
-      async (span) => {
-        const multiplier = options?.resourceFeeMultiplier ?? DEFAULT_RESOURCE_FEE_MULTIPLIER;
-        span.setAttribute('transaction.fee_multiplier', multiplier);
-
-        this.pipelineLogger.debug('Preparing transaction', { resourceFeeMultiplier: multiplier });
-        return withRetry(
-          async () => {
-            const simulation = await simulateTransaction(
-              this.server,
-              tx,
-              options,
-              this.client.retryConfig,
-              this.client.tracerProvider,
-            );
-            if (!simulation.success) {
-              if (simulation.needsRestore) {
-                throw TrustFlowError.simulationFailed(
-                  'simulation requires restore preamble',
-                  simulation.restorePreamble,
-                );
-              }
-              throw TrustFlowError.simulationFailed(simulation.error ?? 'unknown simulation error');
-            }
-
-            // `assembleTransaction` reads the resource fee off `transactionData`
-            // itself (not `minResourceFee`), so the headroom must be written
-            // onto the SorobanTransactionData builder for it to take effect.
-            const minFee = Number(simulation.minResourceFee ?? '0');
-            const paddedFee = Math.ceil(minFee * multiplier).toString();
-            this.pipelineLogger.debug('Transaction prepared', {
-              paddedFee,
-              minResourceFee: simulation.minResourceFee,
-            });
-
-            return rpc
-              .assembleTransaction(tx, {
-                ...(simulation.response as rpc.Api.SimulateTransactionSuccessResponse),
-                transactionData: simulation.transactionData!.setResourceFee(paddedFee),
-                minResourceFee: paddedFee,
-              })
-              .build();
-          },
-          options,
-          'prepare',
-          this.client.timeoutMs,
-        );
     const multiplier = options?.resourceFeeMultiplier ?? DEFAULT_RESOURCE_FEE_MULTIPLIER;
 
     this.pipelineLogger.debug('Preparing transaction', { resourceFeeMultiplier: multiplier });
     return withRetry(
       async () => {
-        // Assemble from the *parsed* RPC response: `rpc.assembleTransaction`
-        // needs the full success shape (the Soroban data builder, its auth
-        // entries and the `_parsed` marker), which the shared
-        // `simulateTransaction` helper deliberately reduces to a decoded
-        // outcome. Rebuilding it here would drop the auth entries and make the
-        // SDK re-parse a response that only carries `results` when raw.
         const simulation = await this.server.simulateTransaction(tx);
         if (rpc.Api.isSimulationError(simulation)) {
           throw TrustFlowError.simulationFailed(simulation.error);
@@ -541,15 +415,15 @@ export class TransactionPipeline {
           );
         }
 
-        // `assembleTransaction` reads the resource fee off `transactionData`
-        // itself (not `minResourceFee`), so the headroom must be written
-        // onto the SorobanTransactionData builder for it to take effect.
         const paddedFee = Math.ceil(Number(simulation.minResourceFee) * multiplier).toString();
         simulation.transactionData.setResourceFee(paddedFee);
         this.pipelineLogger.debug('Transaction prepared', { paddedFee, minResourceFee: simulation.minResourceFee });
 
         return rpc.assembleTransaction(tx, { ...simulation, minResourceFee: paddedFee }).build();
       },
+      options,
+      'prepare',
+      this.client.timeoutMs,
     );
   }
 
@@ -609,57 +483,38 @@ export class TransactionPipeline {
     tx: SubmittableTransaction,
     options?: SubmitOptions,
   ): Promise<PipelineResult<PipelineSubmission>> {
-    return withSdkSpan(
-      this.client.getTracer(),
-      'trustflow.tx.submit',
-      {
-        'rpc.system': 'stellar',
-        'rpc.method': 'sendTransaction',
-        'stellar.network': this.client.network,
+    this.pipelineLogger.debug('Submitting transaction', { isFeeBump: tx instanceof FeeBumpTransaction });
+    return withRetry(
+      async (attempt) => {
+        this.pipelineLogger.debug('Sending transaction to network', { attempt, hash: tx.hash?.toString() });
+        const sendResult = await this.server.sendTransaction(tx);
+
+        if (sendResult.status === 'ERROR') {
+          // Terminal: the node evaluated and rejected this envelope.
+          throw TrustFlowError.submissionFailed(
+            `node rejected transaction (${sendResult.hash})`,
+            sendResult.errorResult,
+          );
+        }
+        if (sendResult.status === 'TRY_AGAIN_LATER') {
+          // The node explicitly deferred: nothing was broadcast, so a replay
+          // is safe and expected.
+          throw markTransient(TrustFlowError.submissionFailed('node reported TRY_AGAIN_LATER'));
+        }
+
+        const ledger = await this.pollForConfirmation(sendResult.hash, options);
+
+        return {
+          hash: sendResult.hash,
+          ledger,
+          feeBumped: tx instanceof FeeBumpTransaction,
+          attempts: attempt,
+          feeCharged: tx.fee,
+        };
       },
-      async (span) => {
-        span.setAttribute('transaction.hash', tx.hash().toString('hex'));
-        span.setAttribute('stellar.fee_bump', tx instanceof FeeBumpTransaction);
-        this.pipelineLogger.debug('Submitting transaction', {
-          isFeeBump: tx instanceof FeeBumpTransaction,
-        });
-        return withRetry(
-          async (attempt) => {
-            this.pipelineLogger.debug('Sending transaction to network', {
-              attempt,
-              hash: tx.hash().toString('hex'),
-            });
-            const sendResult = await this.server.sendTransaction(tx);
-            span.setAttribute('transaction.hash', sendResult.hash);
-
-            if (sendResult.status === 'ERROR') {
-              // Terminal: the node evaluated and rejected this envelope.
-              throw TrustFlowError.submissionFailed(
-                `node rejected transaction (${sendResult.hash})`,
-                sendResult.errorResult,
-              );
-            }
-            if (sendResult.status === 'TRY_AGAIN_LATER') {
-              // The node explicitly deferred: nothing was broadcast, so a replay
-              // is safe and expected.
-              throw markTransient(TrustFlowError.submissionFailed('node reported TRY_AGAIN_LATER'));
-            }
-
-            const ledger = await this.pollForConfirmation(sendResult.hash, options);
-
-            return {
-              hash: sendResult.hash,
-              ledger,
-              feeBumped: tx instanceof FeeBumpTransaction,
-              attempts: attempt,
-              feeCharged: tx.fee,
-            };
-          },
-          options,
-          'submit',
-          this.client.timeoutMs,
-        );
-      },
+      options,
+      'submit',
+      this.client.timeoutMs,
     );
   }
 
@@ -696,9 +551,7 @@ export class TransactionPipeline {
       // Only the queue wait raises a TrustFlowError here; `execute` reports
       // expected failures through its result, so anything else is unexpected.
       if (e instanceof TrustFlowError && e.code === 'TIMEOUT') {
-        this.pipelineLogger.error('Pipeline queue timeout', {
-          sourceAccount: params.sourceAccount,
-        });
+        this.pipelineLogger.error('Pipeline queue timeout', { sourceAccount: params.sourceAccount });
         return fail(e);
       }
       throw e;
@@ -727,19 +580,11 @@ export class TransactionPipeline {
     }
 
     this.pipelineLogger.debug('Signing transaction', { signersCount: params.signers.length });
-    await withSdkSpan(
-      this.client.getTracer(),
-      'trustflow.tx.sign',
-      { 'stellar.network': this.client.network, 'signer.count': params.signers.length },
-      async () => prepared.data.sign(...params.signers),
-    );
+    prepared.data.sign(...params.signers);
 
     const submitted = await this.submit(prepared.data, params.submit);
     if (submitted.ok) {
-      this.pipelineLogger.info('Transaction confirmed', {
-        hash: submitted.data.hash,
-        ledger: submitted.data.ledger,
-      });
+      this.pipelineLogger.info('Transaction confirmed', { hash: submitted.data.hash, ledger: submitted.data.ledger });
       return submitted;
     }
 
@@ -762,12 +607,7 @@ export class TransactionPipeline {
       return submitted;
     }
 
-    await withSdkSpan(
-      this.client.getTracer(),
-      'trustflow.tx.sign',
-      { 'stellar.network': this.client.network, 'signer.count': 1, 'stellar.fee_bump': true },
-      async () => feeBumped.data.sign(feeBumpOptions.feeSource),
-    );
+    feeBumped.data.sign(feeBumpOptions.feeSource);
 
     const escalatedSubmission = await this.submit(feeBumped.data, {
       ...params.submit,
@@ -777,9 +617,7 @@ export class TransactionPipeline {
       return escalatedSubmission;
     }
 
-    this.pipelineLogger.info('Fee-bump transaction confirmed', {
-      hash: escalatedSubmission.data.hash,
-    });
+    this.pipelineLogger.info('Fee-bump transaction confirmed', { hash: escalatedSubmission.data.hash });
     return ok({ ...escalatedSubmission.data, feeBumped: true });
   }
 

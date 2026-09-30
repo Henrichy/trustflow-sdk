@@ -109,48 +109,6 @@ console.log('Released! Transaction:', txHash);
 
 See [docs/QUICKSTART.md](./docs/QUICKSTART.md) for the full walkthrough including disputes, multi-sig, and pagination.
 
-### Air-Gapped Signing (Offline Cold Storage)
-
-Transactions can be built on a networked machine, signed on a host that never
-touches the network, and submitted from anywhere. Useful when the signing key
-lives on an HSM or an air-gapped host.
-
-```typescript
-import { buildUnsignedTransaction, broadcastSignedXDR, hasSignature } from 'trustflow-sdk';
-
-// 1. Build — no signature, no network call.
-const unsigned = buildUnsignedTransaction(
-  unsignedXdr,                 // base64 envelope from assembleTransaction
-  networkPassphrase,
-  fee,                         // e.g. '100'
-  sourceAccount,               // account that will sign
-  contractId,
-  'create_escrow',
-);
-hasSignature(unsigned.xdr); // false
-
-// 2. Sign on the air-gapped host, then bring the result back.
-const signedXdr = await coldStorageSigner.sign(unsigned.xdr);
-
-// 3. Broadcast.
-const submitted = await broadcastSignedXDR(signedXdr, horizonUrl);
-```
-
-`broadcastSignedXDR` checks the envelope carries at least one signature **before**
-making the request. An unsigned envelope would be rejected by Horizon anyway, but
-only after a round trip and with an error that is indistinguishable from a real
-ledger failure; failing locally makes it actionable.
-
-`TrustFlowEscrowClient` exposes the same build step for escrows:
-
-```typescript
-const built = client.buildUnsignedEscrowTransaction(params, sourceAccount);
-if (built.ok) {
-  const signedXdr = await coldStorageSigner.sign(built.data.xdr);
-  await broadcastSignedXDR(signedXdr, horizonUrl);
-}
-```
-
 ### Multi-Sig Escrow (M-of-N)
 
 Collect signatures from multiple approvers before a release is broadcast:
@@ -410,8 +368,6 @@ responsibility until a native, backend-backed `MultiSigStateStore` lands — tra
 
 ### Current Capabilities
 
-- **Batch Simulation**: `client.simulateBatch(invocations)` or `simulateBatch(client, invocations)` combines envelopes and contract reads into one request on batch-capable RPC endpoints, with ordered results and individual failures. See [Batch simulation](./docs/API.md#batch-simulation).
-
 - **🔐 Escrow Management**: Create, fund, release, and monitor escrows
 - **🚀 Transaction Pipeline**: Assemble, simulate, auto-adjust resource fees, fee-bump, and retry Soroban transactions via `TransactionPipeline`, with typed `PipelineResult<T>` errors
 - **✍️ Multi-Sig Escrows**: M-of-N signature collection for shared backend Escrows via `MultiSigEscrowClient`
@@ -423,7 +379,6 @@ responsibility until a native, backend-backed `MultiSigStateStore` lands — tra
 - **🌐 Browser-Ready**: Bundles for Webpack 5, Rollup, esbuild and Vite with **no Node polyfill configuration**; explicit WebCrypto detection with actionable errors
 - **🔑 Wallet Integration**: Built-in support for Freighter wallet
 - **📱 Mobile wallet links**: `generateSep7Uri` from `@trustflow/sdk/wallet` encodes prepared transaction XDR as a SEP-0007 deep link or QR text payload (see [wallet API](docs/API.md#sep-0007-transaction-deep-links-and-qr-data)).
-- **Ledger hardware wallets**: `LedgerWalletProvider` from `@trustflow/sdk/wallet` connects over WebHID and sends Stellar transactions for review and signing on the device. See [Ledger setup and signing](docs/API.md#ledger-hardware-wallet).
 - **📊 Event Monitoring**: Real-time escrow state change tracking
 - **🛡️ Type Safety**: Full TypeScript support with Zod validation schemas
 - **🧪 Test Coverage**: Comprehensive Jest test suite

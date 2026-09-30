@@ -5,7 +5,6 @@ import type { HttpInterceptors } from './interceptors';
 import { logger } from './logger';
 import { SDK_VERSION, DEFAULT_API_VERSION } from '../constants';
 import { DEFAULT_TIMEOUT_MS, isAxiosTimeoutError, axiosTimeoutMs } from './timeout';
-import { installTraceContextInterceptor } from './tracing';
 
 declare module 'axios' {
   export interface AxiosRequestConfig {
@@ -247,7 +246,6 @@ export function createApiHttpClient(options: ApiHttpClientOptions): AxiosInstanc
     timeout: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     headers,
   });
-  installTraceContextInterceptor(instance);
 
   // Interceptors are attached first so request hooks run once per attempt
   // (including retries) and response hooks observe the final outcome, not
@@ -273,7 +271,7 @@ export function createApiHttpClient(options: ApiHttpClientOptions): AxiosInstanc
     (error) => {
       logger.error('HTTP request error', { error: error.message });
       return Promise.reject(error);
-    },
+    }
   );
 
   instance.interceptors?.response?.use(
@@ -294,7 +292,7 @@ export function createApiHttpClient(options: ApiHttpClientOptions): AxiosInstanc
         message: error.message,
       });
       return Promise.reject(error);
-    },
+    }
   );
 
   return instance;

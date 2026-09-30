@@ -1,7 +1,33 @@
-import { MultiSigEscrowClient } from '../src/escrow/multisig';
+import {
+  Account,
+  Asset,
+  BASE_FEE,
+  Keypair,
+  Networks,
+  Operation,
+  TransactionBuilder,
+} from "@stellar/stellar-sdk";
+import { MultiSigEscrowClient } from "../src/escrow/multisig";
 
-const NETWORK = 'Test SDF Network ; September 2015';
-const XDR = 'AAAAAGXQAAAAAAAAAAA=';
+const NETWORK = Networks.TESTNET;
+const testKeypair = Keypair.fromRawEd25519Seed(Buffer.alloc(32, 1));
+const TEST_SIGNER = testKeypair.publicKey();
+
+const tx = new TransactionBuilder(new Account(TEST_SIGNER, "1"), {
+  fee: BASE_FEE,
+  networkPassphrase: NETWORK,
+})
+  .addOperation(
+    Operation.payment({
+      destination: Keypair.random().publicKey(),
+      asset: Asset.native(),
+      amount: "10",
+    }),
+  )
+  .setTimeout(30)
+  .build();
+const XDR = tx.toEnvelope().toXDR("base64");
+
 
 describe('MultiSigEscrowClient state import/export backward compatibility', () => {
   function makeClient(): MultiSigEscrowClient {
@@ -21,14 +47,14 @@ describe('MultiSigEscrowClient state import/export backward compatibility', () =
       networkPassphrase: NETWORK,
       collectedSignatures: [
         {
-          signerAddress: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+          signerAddress: TEST_SIGNER,
           signedXdr: XDR,
           addedAt: Date.now() - 1000,
           // No verified or verifiedAt fields
         },
       ],
       threshold: 1,
-      signers: ['GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'],
+      signers: [TEST_SIGNER],
       status: 'pending' as const,
       createdAt: Date.now() - 2000,
     };
@@ -45,7 +71,7 @@ describe('MultiSigEscrowClient state import/export backward compatibility', () =
       expect(status.data.isReady).toBe(false);
       expect(status.data.signersSigned).toHaveLength(0);
       expect(status.data.signersRemaining).toContain(
-        'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+        TEST_SIGNER,
       );
     }
   });
@@ -62,7 +88,7 @@ describe('MultiSigEscrowClient state import/export backward compatibility', () =
       networkPassphrase: NETWORK,
       collectedSignatures: [
         {
-          signerAddress: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+          signerAddress: TEST_SIGNER,
           signedXdr: XDR,
           addedAt: Date.now() - 1000,
           verified: true,
@@ -70,7 +96,7 @@ describe('MultiSigEscrowClient state import/export backward compatibility', () =
         },
       ],
       threshold: 1,
-      signers: ['GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'],
+      signers: [TEST_SIGNER],
       status: 'ready' as const,
       createdAt: Date.now() - 2000,
     };
@@ -84,7 +110,7 @@ describe('MultiSigEscrowClient state import/export backward compatibility', () =
       expect(status.data.signaturesCollected).toBe(1);
       expect(status.data.isReady).toBe(true);
       expect(status.data.signersSigned).toContain(
-        'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+        TEST_SIGNER,
       );
     }
   });
@@ -93,7 +119,7 @@ describe('MultiSigEscrowClient state import/export backward compatibility', () =
     const client = makeClient();
     const initResult = client.initMultiSigOperation({
       escrowId: 'escrow-1',
-      signers: ['GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'],
+      signers: [TEST_SIGNER],
       threshold: 1,
       operationType: 'release',
       unsignedXdr: XDR,
@@ -106,7 +132,7 @@ describe('MultiSigEscrowClient state import/export backward compatibility', () =
     // Manually add a verified signature (simulating a verified addSignature)
     const op = (client as any).operations.get(operationId);
     op.collectedSignatures.push({
-      signerAddress: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      signerAddress: TEST_SIGNER,
       signedXdr: XDR,
       addedAt: Date.now(),
       verified: true,

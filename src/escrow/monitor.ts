@@ -212,7 +212,9 @@ export class EscrowMonitor {
    * can't stop the rest.
    */
   deliver(events: ParsedTrustFlowEvent[]): void {
+    if (!Array.isArray(events)) return;
     for (const event of events) {
+      if (!event || !event.type) continue;
       const handlers = this.handlers.get(event.type) ?? new Set<EventHandler>();
       const wildcards = this.handlers.get('*') ?? new Set<EventHandler>();
       [...handlers, ...wildcards].forEach((h) => {
@@ -393,15 +395,6 @@ export class EscrowMonitor {
       clearTimeout(this.resilientTimer);
       this.resilientTimer = undefined;
     }
-  }
-
-  unsubscribeAll(): void {
-    this.handlers.clear();
-  }
-
-  destroy(): void {
-    this.stopPolling();
-    this.unsubscribeAll();
   }
 }
 
