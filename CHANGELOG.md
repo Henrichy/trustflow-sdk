@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Batch simulation (#368)
+
+- Issue #368: Added `simulateBatch` and `client.simulateBatch` to simulate envelopes and read invocations with one JSON-RPC array request, matching responses by ID and isolating individual failures.
 ### Ledger hardware wallet (#362)
 
 - Issue #362: Added `LedgerWalletProvider` with WebHID connection, Stellar BIP-44 accounts, device-reviewed transaction signing, verified signatures, and mock-transport tests.

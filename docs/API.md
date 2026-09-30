@@ -193,6 +193,48 @@ if (status.data.isReady) {
 - `.upload(file, options?)` — uploads a `Buffer`, `Uint8Array`, `ArrayBuffer`, `Blob` or browser `File` (a `File`'s `name` and a `Blob`'s `type` are used as the default `filename` / `contentType`); the request goes to `apiUrl` exactly as configured (no slash appended, query string kept); returns `SDKResult<{ cid, url }>`
 - Also available as `client.storage.upload(file)` on `TrustFlowClient` (configure via `new TrustFlowClient({ ipfs: { apiKey } })`)
 
+## Batch simulation
+
+`client.simulateBatch(invocations, options?)` and the root export
+`simulateBatch(client, invocations, options?)` return `Promise<SimulationResult[]>`.
+Each `ContractInvocation` is either `{ xdr: string }` for a prepared transaction
+envelope, or `{ method: string, args?: ScVal[], contractId?: string }` for a read.
+Read arguments must already be encoded with `nativeToScVal` or the contract spec.
+Reads use a dummy source account and the client's network passphrase; they do
+not fetch account state. Use a prepared envelope for source-dependent simulations.
+
+```typescript
+import { TrustFlowClient, simulateBatch } from '@trustflow/sdk';
+import { nativeToScVal } from '@stellar/stellar-sdk';
+
+const client = new TrustFlowClient({ contractId, rpcUrl: batchCapableRpcUrl });
+const results = await simulateBatch(client, [
+  { method: 'get_escrow', args: [nativeToScVal('escrow-1')] },
+  { xdr: preparedEnvelopeXdr },
+]);
+for (const result of results) {
+  if (result.success) console.log(result.returnValue);
+  else console.warn(result.error, result.restorePreamble);
+}
+```
+
+The RPC endpoint must support JSON-RPC 2.0 array requests. Every non-empty batch
+with valid invocations sends one HTTP request per attempt. Results retain input
+order even when responses arrive out of order. Local construction errors,
+JSON-RPC errors, contract errors, missing/duplicate response IDs and malformed
+XDR become individual `{ success: false, error, cost }` results without affecting
+other entries. Restore requirements include `needsRestore: true` and a preamble
+with base64 transaction data. Empty or entirely invalid batches make no request.
+
+`SimulateBatchOptions` accepts `account`, `timeoutMs` and `retry` overrides.
+Transport failures reject the batch with `SIMULATION_ERROR` or `TIMEOUT`; only
+transient transport failures retry the entire unchanged array. The per-attempt
+deadline defaults to the client's `timeoutMs`, then 10 seconds. An endpoint
+that does not return a batch array rejects with `SIMULATION_ERROR`. There is no
+fallback to separate requests, and no transactions are submitted. As with
+single-call simulation, `cost.cpuInsns` and `cost.memBytes` are `'0'` because the
+current RPC simulation schema does not report those fields.
+
 ## Contract Bindings
 - `client.createContractBinding(specEntries, contractId?)` — builds a spec-driven `SorobanContractClient` (`methods.*`, `read_*`, `simulate_*`); also `createContractBinding`, `SorobanSpec`, `AbstractContractClient` and `generateTypeScriptBindings` from the root entry
 - See [CONTRACT_BINDINGS.md](./CONTRACT_BINDINGS.md) for obtaining spec entries, the JS-to-Soroban type-mapping table and known gaps
