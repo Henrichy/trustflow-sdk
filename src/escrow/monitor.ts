@@ -394,6 +394,15 @@ export class EscrowMonitor {
       this.resilientTimer = undefined;
     }
   }
+
+  unsubscribeAll(): void {
+    this.handlers.clear();
+  }
+
+  destroy(): void {
+    this.stopPolling();
+    this.unsubscribeAll();
+  }
 }
 
 /** Heuristic: RPC errors mentioning cursor/retention/expiry mean the saved position is gone. */

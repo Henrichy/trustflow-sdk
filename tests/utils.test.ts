@@ -9,6 +9,7 @@ describe('format', () => {
   it('truncates long address', () => { expect(truncateAddress('GABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVWXYZ')).toContain('...'); });
 });
 
+
 describe('retry', () => {
   it('resolves on first success', async () => {
     const result = await retry(async () => 'ok', 3, 100);
