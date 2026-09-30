@@ -40,6 +40,8 @@ export { SorobanSpec } from './contract/spec';
 export type { SorobanSpecInput, SorobanUnionValue } from './contract/spec';
 export { TrustFlowClient } from './client';
 export type { GetBalanceOptions } from './client';
+export { simulateBatch } from './contract/simulate';
+export type { ContractInvocation, SimulateBatchOptions, SimulationResult } from './contract/simulate';
 export * from './errors';
 
 // Zod runtime validation schemas (#45) — re-exported by name rather than

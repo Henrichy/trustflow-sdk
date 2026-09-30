@@ -25,6 +25,12 @@ import {
 } from './utils/environment';
 import { clearSession, loadSession, saveSession, type Session } from './auth/session';
 import type { ApiRetryConfig } from './utils/http';
+import {
+  simulateBatch,
+  type ContractInvocation,
+  type SimulateBatchOptions,
+  type SimulationResult,
+} from './contract/simulate';
 
 /** Default TTL for opt-in Horizon balance caching. */
 export const DEFAULT_BALANCE_CACHE_TTL_MS = 5_000;
@@ -615,6 +621,25 @@ export class TrustFlowClient {
    */
   getNetworkPassphrase(): string {
     return this.networkPassphrase;
+  }
+
+  /**
+   * Simulates a group of envelopes or read invocations over one JSON-RPC request.
+   * See {@link simulateBatch} for endpoint requirements and failure semantics.
+   * @param invocations - Envelopes or contract reads with encoded ScVal arguments
+   * @param options - Shared account, retry and per-attempt timeout overrides
+   * @returns Results in invocation order, with individual failures isolated
+   * @throws {TrustFlowError} SIMULATION_ERROR or TIMEOUT when the batch transport fails
+   * @example
+   * ```typescript
+   * const results = await client.simulateBatch([{ xdr: firstXdr }, { xdr: secondXdr }]);
+   * ```
+   */
+  simulateBatch(
+    invocations: ContractInvocation[],
+    options: SimulateBatchOptions = {},
+  ): Promise<SimulationResult[]> {
+    return simulateBatch(this, invocations, options);
   }
 
   /**

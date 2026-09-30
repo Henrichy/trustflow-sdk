@@ -50,7 +50,7 @@ src/
 │   ├── bindings.ts        # SorobanContractClient, createContractBinding
 │   ├── spec.ts            # SorobanSpec utilities
 │   ├── read.ts            # Contract read-only queries
-│   ├── simulate.ts        # Simulation helpers
+│   ├── simulate.ts        # Single-envelope and JSON-RPC batch simulation helpers
 │   └── index.ts           # Exports
 │
 ├── tx-pipeline/           # Transaction assembly, simulation, and submission

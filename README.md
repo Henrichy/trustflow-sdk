@@ -368,6 +368,8 @@ responsibility until a native, backend-backed `MultiSigStateStore` lands — tra
 
 ### Current Capabilities
 
+- **Batch Simulation**: `client.simulateBatch(invocations)` or `simulateBatch(client, invocations)` combines envelopes and contract reads into one request on batch-capable RPC endpoints, with ordered results and individual failures. See [Batch simulation](./docs/API.md#batch-simulation).
+
 - **🔐 Escrow Management**: Create, fund, release, and monitor escrows
 - **🚀 Transaction Pipeline**: Assemble, simulate, auto-adjust resource fees, fee-bump, and retry Soroban transactions via `TransactionPipeline`, with typed `PipelineResult<T>` errors
 - **✍️ Multi-Sig Escrows**: M-of-N signature collection for shared backend Escrows via `MultiSigEscrowClient`

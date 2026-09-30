@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Batch simulation (#368)
+
+- Issue #368: Added `simulateBatch` and `client.simulateBatch` to simulate envelopes and read invocations with one JSON-RPC array request, matching responses by ID and isolating individual failures.
+
 ### Wallet SEP-0007 transaction URIs (#379)
 
 - Issue #379: Added `generateSep7Uri` for mobile wallet deep links and QR payloads, with SEP-0007 parameter encoding and URI size validation.
