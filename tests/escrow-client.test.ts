@@ -1,6 +1,7 @@
 import { Keypair } from '@stellar/stellar-sdk';
 import { TrustFlowEscrowClient } from '../src/escrow/client';
 import type { ContractConfig } from '../src/types/contract';
+import type { MilestoneEventMap } from '../src/escrow/client';
 
 const DEPOSITOR = Keypair.random().publicKey();
 const BENEFICIARY = Keypair.random().publicKey();
@@ -148,5 +149,92 @@ describe('TrustFlowEscrowClient.claim', () => {
   it('rejects an invalid claimant address', async () => {
     const client = new TrustFlowEscrowClient(CONFIG);
     await expect(client.claim('esc-1', 'not-a-stellar-address')).rejects.toThrow(/claimantAddress/);
+  });
+});
+
+describe('TrustFlowEscrowClient typed event listeners', () => {
+  it('emits milestone:funded with a typed payload when a milestone is funded', () => {
+    const client = new TrustFlowEscrowClient(CONFIG);
+    const received: Array<MilestoneEventMap['milestone:funded']> = [];
+    const handler = (payload: MilestoneEventMap['milestone:funded']) => {
+      received.push(payload);
+    };
+
+    client.on('milestone:funded', handler);
+    client.emit('milestone:funded', {
+      escrowId: 'esc-1',
+      milestoneId: 'ms-1',
+      amount: 50_000_000n,
+      funder: DEPOSITOR,
+    });
+
+    expect(received).toHaveLength(1);
+    expect(received[0].escrowId).toBe('esc-1');
+    expect(received[0].milestoneId).toBe('ms-1');
+    expect(received[0].amount).toBe(50_000_000n);
+    expect(received[0].funder).toBe(DEPOSITOR);
+  });
+
+  it('emits milestone:released with a typed payload when a milestone is released', () => {
+    const client = new TrustFlowEscrowClient(CONFIG);
+    const received: Array<MilestoneEventMap['milestone:released']> = [];
+    const handler = (payload: MilestoneEventMap['milestone:released']) => {
+      received.push(payload);
+    };
+
+    client.on('milestone:released', handler);
+    client.emit('milestone:released', {
+      escrowId: 'esc-1',
+      milestoneId: 'ms-1',
+      amount: 50_000_000n,
+      beneficiary: BENEFICIARY,
+    });
+
+    expect(received).toHaveLength(1);
+    expect(received[0].escrowId).toBe('esc-1');
+    expect(received[0].milestoneId).toBe('ms-1');
+    expect(received[0].amount).toBe(50_000_000n);
+    expect(received[0].beneficiary).toBe(BENEFICIARY);
+  });
+
+  it('emits dispute:opened with a typed payload when a dispute is opened', () => {
+    const client = new TrustFlowEscrowClient(CONFIG);
+    const received: Array<MilestoneEventMap['dispute:opened']> = [];
+    const handler = (payload: MilestoneEventMap['dispute:opened']) => {
+      received.push(payload);
+    };
+
+    client.on('dispute:opened', handler);
+    client.emit('dispute:opened', {
+      escrowId: 'esc-1',
+      milestoneId: 'ms-1',
+      openedBy: DEPOSITOR,
+      reason: 'milestone not delivered',
+    });
+
+    expect(received).toHaveLength(1);
+    expect(received[0].escrowId).toBe('esc-1');
+    expect(received[0].milestoneId).toBe('ms-1');
+    expect(received[0].openedBy).toBe(DEPOSITOR);
+    expect(received[0].reason).toBe('milestone not delivered');
+  });
+
+  it('removes a listener with off() so it no longer receives events', () => {
+    const client = new TrustFlowEscrowClient(CONFIG);
+    const received: Array<MilestoneEventMap['milestone:funded']> = [];
+    const handler = (payload: MilestoneEventMap['milestone:funded']) => {
+      received.push(payload);
+    };
+
+    client.on('milestone:funded', handler);
+    client.off('milestone:funded', handler);
+    client.emit('milestone:funded', {
+      escrowId: 'esc-1',
+      milestoneId: 'ms-1',
+      amount: 50_000_000n,
+      funder: DEPOSITOR,
+    });
+
+    expect(received).toHaveLength(0);
   });
 });

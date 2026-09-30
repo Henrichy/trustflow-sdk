@@ -40,7 +40,8 @@ src/
 │   ├── connect.ts         # connectWallet, disconnectWallet (returns WalletConnection)
 │   ├── freighter.ts       # Freighter adapter & detection
 │   ├── albedo.ts          # Albedo adapter
-│   ├── types.ts           # WalletType, WalletConnection, WalletAdapter interfaces
+│   ├── types.ts           # WalletType, WalletConnection, WalletAdapter / WalletProvider contracts
+│   ├── ledger.ts          # Ledger WebHID provider and verified on-device Stellar signing
 │   └── index.ts           # Exports
 │
 ├── contract/              # Soroban contract interaction
@@ -132,6 +133,7 @@ The SDK exposes two complementary API styles:
   
 - **wallet functions** — `connectWallet(type)`, `disconnectWallet()`, `isFreighterInstalled()`, `getFreighter()`
   - Error handling: **Throw** `TrustFlowError` on failure (wallet not installed, connection failed)
+  - `LedgerWalletProvider` implements `WalletProvider` (a compatible alias of `WalletAdapter`), owns its transport and connection state, and exposes `connect`, `sign`, `signMessage`, and `disconnect`. Ledger libraries and their browser `Buffer` implementation load only when connecting. Each provider permits one device request at a time; unplugging invalidates its signer state. Transaction signature bases go to the Stellar app for device review; returned signatures are verified against the derived public key before being attached to the original envelope.
   
 - **session functions** — `saveSession()`, `loadSession()`, `isSessionExpired()`, `clearSession()`
   - Error handling: Return `null` or boolean; do not throw

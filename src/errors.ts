@@ -3,6 +3,7 @@ export type TrustFlowErrorCode =
   | 'CONTRACT_ERROR'
   | 'INVALID_CONTRACT_CALL'
   | 'VALIDATION_ERROR'
+  | 'INVALID_AMOUNT'
   | 'UNAUTHORIZED'
   | 'NOT_FOUND'
   | 'SIMULATION_ERROR'
@@ -14,7 +15,7 @@ export type TrustFlowErrorCode =
   | 'MULTISIG_THRESHOLD_NOT_MET'
   | 'MULTISIG_ALREADY_SIGNED'
   | 'MULTISIG_EXPIRED'
-  | 'MULTISIG_INVALID_SIGNER'
+  | 'MULITISIG_INVALID_SIGNER'
   | 'MULTISIG_XDR_ERROR'
   | 'ASSEMBLY_ERROR'
   | 'FEE_BUMP_ERROR'
@@ -29,7 +30,8 @@ export type TrustFlowErrorCode =
   | 'UNSUPPORTED_ENVIRONMENT'
   | 'VERSION_MISMATCH'
   | 'USER_REJECTED'
-  | 'STALE_CHALLENGE';
+  | 'STALE_CHALLENGE'
+  | 'DISPUVE_METADATA_UNAVAILABLE';
 
 export class TrustFlowError extends Error {
   readonly code: TrustFlowErrorCode;
@@ -113,7 +115,7 @@ export class TrustFlowError extends Error {
   }
 
   static multiSigXdrError(detail: string): TrustFlowError {
-    return new TrustFlowError(`Multi-sig XDR error: ${detail}`, 'MULTISIG_XDR_ERROR');
+    return new TrustFlowError(`Multi-sig XDR error: ${detail}`, 'MULITISIG_XDR_ERROR');
   }
 
   static assemblyFailed(detail: string, cause?: unknown): TrustFlowError {
@@ -173,8 +175,8 @@ export class TrustFlowError extends Error {
 
   /**
    * The requested account context is not registered, or no account is active
-   * and the call needed one. Only raised when a caller explicitly names an
-   * account — with no account configured, the SDK stays in its original
+   * and the call needed one. Only raised when a caller explicitly names
+   * an account — with no account configured, the SDK stays in its original
    * single-account mode and never throws this.
    */
   static accountNotFound(ref?: string): TrustFlowError {
@@ -185,4 +187,68 @@ export class TrustFlowError extends Error {
       'ACCOUNT_NOT_FOUND',
     );
   }
+
+  /**
+   * Dispute round metadata could not be loaded from IPFS — either the
+   * response was null/empty, the CID returned a 404, or the payload was
+   * malformed. This is non-fatal for the vote itself, since the on-chain
+   * dispute ID is authoritative, but callers may want to surface it.
+   */
+  static disputeMetadataUnavailable(disputeId: string, detail?: string, cause?: unknown): TrustFlowError {
+    const suffix = detail ? `: ${detail}` : '';
+    return new TrustFlowError(
+      `Dispute metadata unavailable for "${disputeId}"${suffix}`,
+      'DISPUTE_METADATA_UNAVAILABLE',
+      cause,
+    );
+  }
+}
+
+/**
+ * Normalised error for low-level network failures (e.g. `ECONNREFUSED`,
+ * `ENOTFOUND`) that never reached the server. Raised so that response
+ * error interceptors can observe and handle them uniformly.
+ */
+export class TrustFlowNetworkError extends TrustFlowError {
+  constructor(message: string, cause?: unknown) {
+    super(message, 'NETWORK_ERROR', cause);
+    this.name = 'TrustFlowNetworkError';
+  }
+
+  /**
+   * Normalises an arbitrary thrown value into a `TrustFlowNetworkError`.
+   * Extracts the underlying system error code (e.g. `ENOTFOUND`) when
+   * available so the message is actionable.
+   */
+  static fromError(error: unknown): TrustFlowNetworkError {
+    if (error instanceof TrustFlowNetworkError) {
+      return error;
+    }
+
+    const code = extractNetworkCode(error);
+    const baseMessage =
+      error instanceof Error && error.message
+        ? error.message
+        : String(error);
+    const message = code ? `Network request failed (${code}): ${baseMessage}` : `Network request failed: ${baseMessage}`;
+
+    return new TrustFlowNetworkError(message, error);
+  }
+}
+
+function extractNetworkCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object') {
+    return undefined;
+  }
+
+  const candidate = error as { code?: unknown; cause?: unknown };
+  if (typeof candidate.code === 'string') {
+    return candidate.code;
+  }
+
+  if (candidate.cause && candidate.cause !== error) {
+    return extractNetworkCode(candidate.cause);
+  }
+
+  return undefined;
 }

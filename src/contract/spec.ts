@@ -658,4 +658,88 @@ export class SorobanSpec {
       return scVal;
     }
   }
+
+  /**
+   * Decodes an `xdr.ScVal` into a JSON-friendly structure using the spec's
+   * user-defined types (structs, enums, unions) to attach names to fields and
+   * cases. Falls back to `scValToNative` for values that have no spec entry.
+   *
+   * @param scVal - ScVal to decode
+   * @param typeDef - Optional spec type definition to guide decoding
+   */
+  scValToJson(scVal: xdr.ScVal, typeDef?: xdr.ScSpecTypeDef): unknown {
+    if (!scVal) return null;
+    if (!typeDef) {
+      try {
+        return scValToNative(scVal);
+      } catch {
+        return scVal.toXDR('base64');
+      }
+    }
+    const kind = typeDef.switch().name;
+    switch (kind) {
+      case 'scSpecTypeOption': {
+        if (scVal.switch().name === 'scvVoid') return null;
+        return this.scValToJson(scVal, typeDef.option().valueType());
+      }
+      case 'scSpecTypeVec': {
+        const elemType = typeDef.vec().elementType();
+        return scVal.vec()?.map((v) => this.scValToJson(v, elemType)) ?? [];
+      }
+      case 'scSpecTypeMap': {
+        const keyType = typeDef.map().keyType();
+        const valType = typeDef.map().valueType();
+        const out: Record<string, unknown> = {};
+        for (const entry of scVal.map() ?? []) {
+          const key = this.scValToJson(entry.key(), keyType);
+          out[typeof key === 'string' ? key : JSON.stringify(key)] = this.scValToJson(
+            entry.val(),
+            valType,
+          );
+        }
+        return out;
+      }
+      case 'scSpecTypeTuple': {
+        const types = typeDef.tuple().valueTypes();
+        return (scVal.vec() ?? []).map((v, i) => this.scValToJson(v, types[i]));
+      }
+      case 'scSpecTypeUdt': {
+        const udtName = typeDef.udt().name().toString();
+        const structSpec = this.structs.get(udtName);
+        if (structSpec && scVal.switch().name === 'scvMap') {
+          const out: Record<string, unknown> = {};
+          for (const entry of scVal.map() ?? []) {
+            const fieldName = scValToNative(entry.key()) as string;
+            const field = structSpec.fields.find((f) => f.name === fieldName);
+            out[fieldName] = this.scValToJson(entry.val(), field?.type);
+          }
+          return out;
+        }
+        const enumSpec = this.enums.get(udtName);
+        if (enumSpec && scVal.switch().name === 'scvU32') {
+          const value = scVal.u32();
+          const enumCase = enumSpec.cases.find((c) => c.value === value);
+          return enumCase ? enumCase.name : value;
+        }
+        const unionSpec = this.unions.get(udtName);
+        if (unionSpec && scVal.switch().name === 'scvVec') {
+          const vec = scVal.vec() ?? [];
+          if (vec.length === 0) return null;
+          const caseName = scValToNative(vec[0]) as string;
+          const unionCase = unionSpec.cases.find((c) => c.name === caseName);
+          if (!unionCase) return { case: caseName };
+          if (!unionCase.typeList || unionCase.typeList.length === 0) {
+            return { case: caseName };
+          }
+          return {
+            case: caseName,
+            values: unionCase.typeList.map((t, i) => this.scValToJson(vec[i + 1], t)),
+          };
+        }
+        return this.scValToJson(scVal);
+      }
+      default:
+        return this.scValToJson(scVal);
+    }
+  }
 }

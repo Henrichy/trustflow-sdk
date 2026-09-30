@@ -101,6 +101,7 @@ export const ClientConfigSchema = z.object({
   apiBaseUrl: z.string().url('API base URL must be a valid URL').optional(),
   apiKey: z.string().optional(),
   apiVersion: z.string().optional(),
+  tracerProvider: z.any().optional(),
   balanceCache: z
     .object({
       ttlMs: z.number().positive().optional(),

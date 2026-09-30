@@ -81,6 +81,7 @@ export async function simulateContractCall(
       { toEnvelope: () => ({ toXDR: () => xdr }) } as any,
       options,
       client.retryConfig,
+      client.tracerProvider,
     );
     return {
       success: outcome.success,
@@ -88,10 +89,12 @@ export async function simulateContractCall(
       returnValue: outcome.returnValue,
       error: outcome.error,
       needsRestore: outcome.needsRestore,
-      restorePreamble: outcome.restorePreamble && {
-        minResourceFee: outcome.restorePreamble.minResourceFee,
-        transactionData: outcome.restorePreamble.transactionData.build().toXDR('base64'),
-      },
+      restorePreamble: outcome.restorePreamble
+        ? {
+            minResourceFee: outcome.restorePreamble.minResourceFee,
+            transactionData: outcome.restorePreamble.transactionData.build().toXDR('base64'),
+          }
+        : undefined,
     };
   } catch (e) {
     // A `TIMEOUT` (or any typed SDK error) keeps its code rather than being
