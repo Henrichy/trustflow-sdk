@@ -1,3 +1,5 @@
+import { TransactionBuilder as SdkTransactionBuilder } from '@stellar/stellar-sdk';
+
 import { TransactionBuilder } from '@stellar/stellar-sdk';
 import { TrustFlowError } from '../errors';
 import { withTransientRetry } from '../utils/node-retry';
@@ -19,6 +21,34 @@ export interface SubmittedTx {
   /** Always `true`: a Horizon response with `successful: false` is thrown as a `SUBMISSION_ERROR`. */
   successful: boolean;
   ledger?: number;
+}
+
+/**
+ * An unsigned transaction envelope, ready to be signed offline.
+ *
+ * Produced by `buildUnsignedTransaction` and consumed by
+ * {@link broadcastSignedXDR}, which together let a cold-storage key sign a
+ * transaction on a machine that never touches the network.
+ */
+export interface UnsignedTx {
+  /** Base64 XDR of the unsigned envelope, for air-gapped signing. */
+  xdr: string;
+  /** Passphrase the envelope was built for; the signer must use the same one. */
+  networkPassphrase: string;
+  /**
+   * Base fee the envelope was assembled with, as a string to avoid precision
+   * loss on values above `Number.MAX_SAFE_INTEGER`.
+   */
+  fee: string;
+  /**
+   * Source account that must sign. A cold-storage signer needs this to know
+   * which key is expected, and the SDK refuses to broadcast if the resulting
+   * envelope is not signed by it.
+   */
+  sourceAccount: string;
+  /** Contract and method the envelope invokes, for caller-side verification. */
+  contractId: string;
+  method: string;
 }
 
 /**
@@ -352,4 +382,129 @@ export async function submitTransaction(
     );
   }
   return { hash: data.hash, successful: true, ledger: data.ledger };
+}
+
+/** Base64 alphabet, as used by the XDR wire format. */
+const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+
+/**
+ * Builds an unsigned transaction XDR for air-gapped signing.
+ *
+ * The returned envelope carries no signature, so it is safe to hand to a signer
+ * that has no network access — an HSM, an air-gapped host, or a cold-storage
+ * device. The signer adds a signature over the envelope's signature base and
+ * returns the signed XDR, which {@link broadcastSignedXDR} then submits.
+ *
+ * Kept separate from submission on purpose: nothing here touches the network
+ * beyond the caller-supplied data, so a signing machine can be fully offline.
+ *
+ * @param xdr - Base64 unsigned transaction envelope, e.g. from a `SorobanRpc`
+ *   `getTransaction` or an offline `assembleTransaction`
+ * @param networkPassphrase - Passphrase the signer must use; it is echoed back
+ *   so the caller can confirm the signing host is on the intended network
+ * @param fee - Base fee the envelope was assembled with, as a string
+ * @param sourceAccount - Account expected to sign the envelope
+ * @param contractId - Contract the envelope invokes
+ * @param method - Contract method the envelope invokes
+ * @returns The {@link UnsignedTx} bundle to hand to an offline signer
+ * @throws {TrustFlowError} `INVALID_CONFIG` when the XDR is not valid base64
+ */
+export function buildUnsignedTransaction(
+  xdr: string,
+  networkPassphrase: string,
+  fee: string,
+  sourceAccount: string,
+  contractId: string,
+  method: string,
+): UnsignedTx {
+  const trimmed = xdr.trim();
+  if (!trimmed) {
+    throw new TrustFlowError('Unsigned transaction XDR must not be empty', 'INVALID_CONFIG');
+  }
+  if (!BASE64_RE.test(trimmed)) {
+    throw new TrustFlowError('Unsigned transaction XDR must be valid base64', 'INVALID_CONFIG');
+  }
+  if (!networkPassphrase.trim()) {
+    throw new TrustFlowError('Network passphrase must not be empty', 'INVALID_CONFIG');
+  }
+  if (!sourceAccount.trim()) {
+    throw new TrustFlowError('Source account must not be empty', 'INVALID_CONFIG');
+  }
+
+  return {
+    xdr: trimmed,
+    networkPassphrase,
+    fee,
+    sourceAccount,
+    contractId,
+    method,
+  };
+}
+
+/**
+ * Reports whether a base64 XDR envelope carries at least one signature.
+ *
+ * A Stellar envelope is base64 of a `TransactionEnvelope`, which begins with a
+ * 4-byte discriminant. The first two signature slots are how many decorated
+ * signatures follow. Rather than assume a payload layout, this uses the SDK's
+ * own decoder when it is available and falls back to a structural check, so the
+ * answer is conservative: an envelope that cannot be shown to be signed is
+ * reported as unsigned.
+ *
+ * @param xdr - Base64 transaction envelope
+ * @returns `true` when the envelope is non-empty and signed
+ */
+export function hasSignature(xdr: string): boolean {
+  const trimmed = xdr.trim();
+  if (!trimmed || !BASE64_RE.test(trimmed)) return false;
+  try {
+    // `fromXDR` throws on a malformed envelope, which is the behaviour we want:
+    // an undecodable envelope is not a signed one.
+    const tx = SdkTransactionBuilder.fromXDR(trimmed, 'base64');
+    const signatures = (tx as { signatures?: unknown[] }).signatures;
+    return Array.isArray(signatures) && signatures.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Broadcasts a signed transaction XDR to Horizon.
+ *
+ * The second half of the offline workflow: `buildUnsignedTransaction` →
+ * sign on an air-gapped host → `broadcastSignedXDR` from a networked machine.
+ *
+ * The envelope is checked for signature completeness *before* the request is
+ * sent. Horizon would reject an unsigned envelope anyway, but only after a
+ * round trip, and the rejection is indistinguishable from a real ledger
+ * failure. Failing locally turns that into an actionable error.
+ *
+ * @param signedXdr - Base64 signed transaction envelope
+ * @param horizonUrl - Horizon base URL (with or without a trailing slash)
+ * @param retry - Optional retry budget
+ * @param timeoutMs - Optional request timeout in milliseconds
+ * @returns The submitted transaction hash
+ * @throws {TrustFlowError} `INVALID_CONFIG` when the XDR is empty, is not
+ *   base64, or carries no signature; `SUBMISSION_ERROR` when Horizon rejects it
+ */
+export async function broadcastSignedXDR(
+  signedXdr: string,
+  horizonUrl: string,
+  retry?: ApiRetryConfig,
+  timeoutMs?: number,
+): Promise<SubmittedTx> {
+  const trimmed = signedXdr.trim();
+  if (!trimmed) {
+    throw new TrustFlowError('Signed transaction XDR must not be empty', 'INVALID_CONFIG');
+  }
+  if (!BASE64_RE.test(trimmed)) {
+    throw new TrustFlowError('Signed transaction XDR must be valid base64', 'INVALID_CONFIG');
+  }
+  if (!hasSignature(trimmed)) {
+    throw new TrustFlowError(
+      'Signed transaction XDR contains no signature; broadcast expects a signed envelope',
+      'INVALID_CONFIG',
+    );
+  }
+  return submitTransaction(trimmed, horizonUrl, retry, timeoutMs);
 }

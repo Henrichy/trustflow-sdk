@@ -43,24 +43,28 @@ describe('TrustFlowEscrowClient.createEscrow', () => {
 
   it('rejects an invalid depositor address', async () => {
     const client = new TrustFlowEscrowClient(CONFIG);
-    await expect(
-      client.createEscrow({
-        depositor: 'not-a-stellar-address',
-        beneficiary: BENEFICIARY,
-        amountXLM: '50',
-      }),
-    ).rejects.toThrow(/depositor/);
+    const result = await client.createEscrow({
+      depositor: 'not-a-stellar-address',
+      beneficiary: BENEFICIARY,
+      amountXLM: '50',
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatch(/Validation failed.*sender/i);
+    }
   });
 
   it('rejects an invalid beneficiary address', async () => {
     const client = new TrustFlowEscrowClient(CONFIG);
-    await expect(
-      client.createEscrow({
-        depositor: DEPOSITOR,
-        beneficiary: 'not-a-stellar-address',
-        amountXLM: '50',
-      }),
-    ).rejects.toThrow(/beneficiary/);
+    const result = await client.createEscrow({
+      depositor: DEPOSITOR,
+      beneficiary: 'not-a-stellar-address',
+      amountXLM: '50',
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatch(/Validation failed.*recipient/i);
+    }
   });
 
   it('rejects a non-positive amount', async () => {
@@ -73,7 +77,7 @@ describe('TrustFlowEscrowClient.createEscrow', () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.error).toMatch(/positive/);
+      expect(result.error).toMatch(/Validation failed.*amount/i);
     }
   });
 });
@@ -103,15 +107,17 @@ describe('TrustFlowEscrowClient.fund', () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.error).toMatch(/escrowId/);
+      expect(result.error).toMatch(/Validation failed.*escrowId/i);
     }
   });
 
   it('rejects an invalid funder address', async () => {
     const client = new TrustFlowEscrowClient(CONFIG);
-    await expect(client.fund('esc-1', 'not-a-stellar-address', 50_000_000n)).rejects.toThrow(
-      /funderAddress/,
-    );
+    const result = await client.fund('esc-1', 'not-a-stellar-address', 50_000_000n);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatch(/Validation failed.*funder/i);
+    }
   });
 
   it('rejects a non-positive amount', async () => {
@@ -120,7 +126,7 @@ describe('TrustFlowEscrowClient.fund', () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.error).toMatch(/positive/);
+      expect(result.error).toMatch(/Validation failed.*amount/i);
     }
   });
 });
@@ -142,13 +148,17 @@ describe('TrustFlowEscrowClient.claim', () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.error).toMatch(/escrowId/);
+      expect(result.error).toMatch(/Validation failed.*escrowId/i);
     }
   });
 
   it('rejects an invalid claimant address', async () => {
     const client = new TrustFlowEscrowClient(CONFIG);
-    await expect(client.claim('esc-1', 'not-a-stellar-address')).rejects.toThrow(/claimantAddress/);
+    const result = await client.claim('esc-1', 'not-a-stellar-address');
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatch(/Validation failed.*claimant/i);
+    }
   });
 });
 

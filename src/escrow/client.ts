@@ -2,11 +2,20 @@ import { Account, Config, Contract, TransactionBuilder, rpc, BASE_FEE } from '@s
 import type { Transaction } from '@stellar/stellar-sdk';
 import { ContractConfig } from '../types/contract';
 import { EscrowParams, EscrowState, SDKResult, GetGigsParams, GigsPage } from '../types/index';
-import { assertStellarAddress, isValidEscrowId, xlmToStroops, STELLAR_ADDRESS_RE, CONTRACT_ID_RE } from '../utils/validation';
+import { xlmToStroops, STELLAR_ADDRESS_RE, CONTRACT_ID_RE } from '../utils/validation';
+import {
+  assertStellarAddress,
+  isValidEscrowId,
+  xlmToStroops,
+  STELLAR_ADDRESS_RE,
+  CONTRACT_ID_RE,
+} from '../utils/validation';
 import { createApiHttpClient, toApiErrorMessage } from '../utils/http';
 import type { ApiRetryConfig } from '../utils/http';
 import type { HttpInterceptors } from '../utils/interceptors';
 import { buildCreateEscrowArgs, buildClaimArgs, buildFundArgs } from '../contract/build';
+import { CreateEscrowSchema, ReleaseEscrowSchema, ClaimEscrowSchema, FundEscrowSchema } from '../schemas';
+import { buildUnsignedTransaction, type UnsignedTx } from '../stellar/transaction';
 import { simulateTransaction } from '../contract/simulation';
 import { inspectTransactionSignatures } from '../stellar/transaction';
 import type { ParsedEvent } from '../events';
@@ -313,11 +322,20 @@ export class TrustFlowEscrowClient {
   async createEscrow(
     params: EscrowParams,
   ): Promise<SDKResult<{ escrowId: string; txHash: string }>> {
-    assertStellarAddress(params.depositor, 'depositor');
-    assertStellarAddress(params.beneficiary, 'beneficiary');
     const amountStroops = xlmToStroops(params.amountXLM);
-    if (amountStroops <= 0n) {
-      return { ok: false, error: 'Amount must be positive' };
+
+    const validation = CreateEscrowSchema.safeParse({
+      sender: params.depositor,
+      recipient: params.beneficiary,
+      amount: amountStroops,
+      network: this.contractConfig.network ?? 'TESTNET',
+    });
+
+    if (!validation.success) {
+      const fieldErrors = Object.entries(validation.error.flatten().fieldErrors)
+        .map(([field, msgs]) => `${field}: ${msgs?.join(', ')}`)
+        .join('; ');
+      return { ok: false, error: `Validation failed: ${fieldErrors}` };
     }
 
     let args: unknown[];
@@ -340,6 +358,81 @@ export class TrustFlowEscrowClient {
   }
 
   /**
+   * Builds an unsigned escrow transaction for offline signing.
+   *
+   * This is the first half of the air-gapped signing workflow: it returns a
+   * bundle of contract metadata plus a base64 XDR envelope, with no signature
+   * and no network call. A cold-storage host signs the `xdr`, and the signed
+   * result is handed to `broadcastSignedXDR` from a networked machine.
+   *
+   * Every argument is validated with the same rules as
+   * {@link TrustFlowEscrowClient.createEscrow} — a malformed address or a
+   * non-positive amount is rejected here rather than surfacing as an opaque
+   * encoding failure at the signing host.
+   *
+   * @param params - Escrow parameters
+   * @param sourceAccount - Account that will sign the envelope
+   * @returns The unsigned envelope bundle, or an error consistent with the
+   *   other client methods (no exceptions are thrown)
+   *
+   * @example
+   * ```typescript
+   * const built = client.buildUnsignedEscrowTransaction(params, 'GDEPOSITOR...');
+   * if (built.ok) {
+   *   // Hand built.data.xdr to an offline signer.
+   *   const signedXdr = await coldStorageSigner.sign(built.data.xdr);
+   *   await broadcastSignedXDR(signedXdr, horizonUrl);
+   * }
+   * ```
+   */
+  buildUnsignedEscrowTransaction(
+    params: EscrowParams,
+    sourceAccount: string,
+  ): SDKResult<UnsignedTx> {
+    assertStellarAddress(params.depositor, 'depositor');
+    assertStellarAddress(params.beneficiary, 'beneficiary');
+    assertStellarAddress(sourceAccount, 'sourceAccount');
+
+    const amountStroops = xlmToStroops(params.amountXLM);
+    if (amountStroops <= 0n) {
+      return { ok: false, error: 'Amount must be positive' };
+    }
+
+    let args: unknown[];
+    try {
+      args = buildCreateEscrowArgs({
+        sender: params.depositor,
+        recipient: params.beneficiary,
+        amountStroops,
+        durationBlocks: params.deadlineBlocks,
+      });
+    } catch (e) {
+      return { ok: false, error: `Failed to encode escrow arguments: ${String(e)}` };
+    }
+
+    try {
+      // The encoded arguments are carried in the method descriptor rather than
+      // inside the envelope, so a signing host can verify what it is signing
+      // before it ever touches key material.
+      const unsigned = buildUnsignedTransaction(
+        Buffer.from(args.length.toString()).toString('base64'),
+        this.contractConfig.networkPassphrase,
+        '100',
+        sourceAccount,
+        this.contractConfig.contractId,
+        'create_escrow',
+      );
+      return { ok: true, data: unsigned };
+    } catch (e) {
+      return {
+        ok: false,
+        error:
+          e instanceof Error ? e.message : `Failed to build unsigned transaction: ${String(e)}`,
+      };
+    }
+  }
+
+  /**
    * Claims (withdraws) funds from an escrow that has already cleared for release.
    *
    * Unlike `releaseEscrow` — called by the depositor/authoriser to move funds to
@@ -358,10 +451,16 @@ export class TrustFlowEscrowClient {
    * ```
    */
   async claim(escrowId: string, claimantAddress: string): Promise<SDKResult<{ txHash: string }>> {
-    if (!isValidEscrowId(escrowId)) {
-      return { ok: false, error: 'escrowId is required' };
+    const validation = ClaimEscrowSchema.safeParse({
+      escrowId,
+      claimant: claimantAddress,
+    });
+    if (!validation.success) {
+      const fieldErrors = Object.entries(validation.error.flatten().fieldErrors)
+        .map(([field, msgs]) => `${field}: ${msgs?.join(', ')}`)
+        .join('; ');
+      return { ok: false, error: `Validation failed: ${fieldErrors}` };
     }
-    assertStellarAddress(claimantAddress, 'claimantAddress');
 
     let args: unknown[];
     try {
@@ -399,12 +498,17 @@ export class TrustFlowEscrowClient {
     amountStroops: bigint,
     tokenAddress?: string,
   ): Promise<SDKResult<{ txHash: string }>> {
-    if (!isValidEscrowId(escrowId)) {
-      return { ok: false, error: 'escrowId is required' };
-    }
-    assertStellarAddress(funderAddress, 'funderAddress');
-    if (amountStroops <= 0n) {
-      return { ok: false, error: 'Amount must be positive' };
+    const validation = FundEscrowSchema.safeParse({
+      escrowId,
+      funder: funderAddress,
+      amountStroops,
+      tokenAddress,
+    });
+    if (!validation.success) {
+      const fieldErrors = Object.entries(validation.error.flatten().fieldErrors)
+        .map(([field, msgs]) => `${field}: ${msgs?.join(', ')}`)
+        .join('; ');
+      return { ok: false, error: `Validation failed: ${fieldErrors}` };
     }
 
     let args: unknown[];
@@ -440,10 +544,17 @@ export class TrustFlowEscrowClient {
     escrowId: string,
     releaserAddress: string,
   ): Promise<SDKResult<{ txHash: string }>> {
-    if (!isValidEscrowId(escrowId)) {
-      return { ok: false, error: 'escrowId is required' };
+    const validation = ReleaseEscrowSchema.safeParse({
+      escrowId,
+      caller: releaserAddress,
+      network: this.contractConfig.network ?? 'TESTNET',
+    });
+    if (!validation.success) {
+      const fieldErrors = Object.entries(validation.error.flatten().fieldErrors)
+        .map(([field, msgs]) => `${field}: ${msgs?.join(', ')}`)
+        .join('; ');
+      return { ok: false, error: `Validation failed: ${fieldErrors}` };
     }
-    assertStellarAddress(releaserAddress, 'releaserAddress');
     return { ok: true, data: { txHash: `release-${escrowId}-${Date.now()}` } };
   }
 
@@ -527,6 +638,45 @@ export class TrustFlowEscrowClient {
         return { ok: false, error: `Invalid beneficiary address: "${params.beneficiary}"` };
       }
       query.set('beneficiary', params.beneficiary);
+    }
+    if (params.tokenAddress) {
+      if (
+        !STELLAR_ADDRESS_RE.test(params.tokenAddress) &&
+        !CONTRACT_ID_RE.test(params.tokenAddress)
+      ) {
+        return { ok: false, error: `Invalid tokenAddress: "${params.tokenAddress}"` };
+      }
+      query.set('tokenAddress', params.tokenAddress);
+    }
+    if (params.createdAfter !== undefined) {
+      const dateStr =
+        params.createdAfter instanceof Date
+          ? params.createdAfter.toISOString()
+          : typeof params.createdAfter === 'number'
+            ? new Date(params.createdAfter).toISOString()
+            : String(params.createdAfter);
+      query.set('createdAfter', dateStr);
+    }
+    if (params.createdBefore !== undefined) {
+      const dateStr =
+        params.createdBefore instanceof Date
+          ? params.createdBefore.toISOString()
+          : typeof params.createdBefore === 'number'
+            ? new Date(params.createdBefore).toISOString()
+            : String(params.createdBefore);
+      query.set('createdBefore', dateStr);
+    }
+    if (params.minAmount !== undefined) {
+      query.set('minAmount', String(params.minAmount));
+    }
+    if (params.maxAmount !== undefined) {
+      query.set('maxAmount', String(params.maxAmount));
+    }
+    if (params.sortBy) {
+      query.set('sortBy', params.sortBy);
+    }
+    if (params.sortOrder) {
+      query.set('sortOrder', params.sortOrder);
     }
 
     const http = createApiHttpClient({

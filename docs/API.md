@@ -193,6 +193,48 @@ if (status.data.isReady) {
 - `.upload(file, options?)` — uploads a `Buffer`, `Uint8Array`, `ArrayBuffer`, `Blob` or browser `File` (a `File`'s `name` and a `Blob`'s `type` are used as the default `filename` / `contentType`); the request goes to `apiUrl` exactly as configured (no slash appended, query string kept); returns `SDKResult<{ cid, url }>`
 - Also available as `client.storage.upload(file)` on `TrustFlowClient` (configure via `new TrustFlowClient({ ipfs: { apiKey } })`)
 
+## Batch simulation
+
+`client.simulateBatch(invocations, options?)` and the root export
+`simulateBatch(client, invocations, options?)` return `Promise<SimulationResult[]>`.
+Each `ContractInvocation` is either `{ xdr: string }` for a prepared transaction
+envelope, or `{ method: string, args?: ScVal[], contractId?: string }` for a read.
+Read arguments must already be encoded with `nativeToScVal` or the contract spec.
+Reads use a dummy source account and the client's network passphrase; they do
+not fetch account state. Use a prepared envelope for source-dependent simulations.
+
+```typescript
+import { TrustFlowClient, simulateBatch } from '@trustflow/sdk';
+import { nativeToScVal } from '@stellar/stellar-sdk';
+
+const client = new TrustFlowClient({ contractId, rpcUrl: batchCapableRpcUrl });
+const results = await simulateBatch(client, [
+  { method: 'get_escrow', args: [nativeToScVal('escrow-1')] },
+  { xdr: preparedEnvelopeXdr },
+]);
+for (const result of results) {
+  if (result.success) console.log(result.returnValue);
+  else console.warn(result.error, result.restorePreamble);
+}
+```
+
+The RPC endpoint must support JSON-RPC 2.0 array requests. Every non-empty batch
+with valid invocations sends one HTTP request per attempt. Results retain input
+order even when responses arrive out of order. Local construction errors,
+JSON-RPC errors, contract errors, missing/duplicate response IDs and malformed
+XDR become individual `{ success: false, error, cost }` results without affecting
+other entries. Restore requirements include `needsRestore: true` and a preamble
+with base64 transaction data. Empty or entirely invalid batches make no request.
+
+`SimulateBatchOptions` accepts `account`, `timeoutMs` and `retry` overrides.
+Transport failures reject the batch with `SIMULATION_ERROR` or `TIMEOUT`; only
+transient transport failures retry the entire unchanged array. The per-attempt
+deadline defaults to the client's `timeoutMs`, then 10 seconds. An endpoint
+that does not return a batch array rejects with `SIMULATION_ERROR`. There is no
+fallback to separate requests, and no transactions are submitted. As with
+single-call simulation, `cost.cpuInsns` and `cost.memBytes` are `'0'` because the
+current RPC simulation schema does not report those fields.
+
 ## Contract Bindings
 - `client.createContractBinding(specEntries, contractId?)` — builds a spec-driven `SorobanContractClient` (`methods.*`, `read_*`, `simulate_*`); also `createContractBinding`, `SorobanSpec`, `AbstractContractClient` and `generateTypeScriptBindings` from the root entry
 - See [CONTRACT_BINDINGS.md](./CONTRACT_BINDINGS.md) for obtaining spec entries, the JS-to-Soroban type-mapping table and known gaps
@@ -377,6 +419,81 @@ After obtaining a token, persist it using the session storage functions:
 ## Wallet Module
 
 Wallet integration utilities for connecting to Stellar wallets (Freighter, Albedo, and others) and managing connections.
+
+### Ledger hardware wallet
+
+`LedgerWalletProvider` implements the exported `WalletProvider` contract, a compatible
+alias of `WalletAdapter`. Import it from `@trustflow/sdk/wallet` and retain the instance
+for connection, signing and disconnection. `connectWallet()` and `disconnectWallet()`
+remain extension-wallet helpers; use the provider's methods for Ledger.
+
+```typescript
+import { LedgerWalletProvider } from '@trustflow/sdk/wallet';
+
+const ledger = new LedgerWalletProvider({ network: 'TESTNET', accountIndex: 0 });
+connectButton.addEventListener('click', async () => {
+  const connection = await ledger.connect();
+  // Build the transaction using connection.publicKey and the TESTNET passphrase.
+  const signedXdr = await ledger.sign(unsignedXdr, connection.network);
+  // Submit signedXdr through your existing transaction pipeline when ready.
+});
+// Release the device when the wallet session ends:
+await ledger.disconnect();
+```
+
+Use a desktop Chrome, Brave or Edge browser with WebHID enabled, on HTTPS or
+localhost. Call `connect()` from a user gesture, select the Ledger in the browser
+chooser, unlock it, open the Stellar app, and confirm the address on the device.
+`isAvailable()` checks the secure context and WebHID API without opening a chooser;
+it does not guarantee that a device is attached. Firefox, Safari and Node/SSR have
+no default WebHID transport. Importing or constructing the provider is SSR-safe.
+LedgerJS needs a global `Buffer`; the provider installs the browser `buffer`
+implementation at connection time only if none exists.
+
+Options:
+
+- `accountIndex?: number`: integer from 0 through 2147483647, default 0. Derivation
+  path is `44'/148'/<accountIndex>'` (Stellar BIP-44, all components hardened).
+- `network?: Network`: SDK network name, default `TESTNET`; returned in the connection.
+- `networkPassphrase?: string`: nonempty custom passphrase overriding the network default.
+- `transportFactory?: () => Promise<Transport>`: alternative Ledger transport or test
+  double; bypasses browser availability checks. The provider owns and closes this transport.
+
+`sign(xdr, network)` accepts a base64 transaction envelope and the configured network
+name or exact passphrase. Ledger has no independent network setting: build the transaction
+with that same passphrase. Envelope XDR does not encode its network, so the provider cannot
+infer the builder's original passphrase. The full network-bound signature base is sent to
+`@ledgerhq/hw-app-str.signTransaction` for physical-device review and approval. It returns
+a signed base64 envelope, preserves existing signatures (including fee-bump inner
+signatures), and verifies the new ed25519 signature locally. It does not submit transactions.
+
+Device firmware and Stellar app versions determine which operations and transaction
+sizes can be reviewed. Update the Stellar app for Soroban or fee-bump support; unsupported
+transactions fail with `SIGNING_ERROR`. There is no automatic hash/blind signing fallback.
+Soroban authorization entries are separate signatures and are not signed by this method.
+`signMessage(message)` reports `SIGNING_ERROR` without a device request: this SDK's
+adapter requires signatures over raw UTF-8 bytes, whereas Ledger's Stellar app uses
+SEP-53 (a hash of a prefixed message). Ledger transaction signing therefore cannot
+be used as the SDK's raw-message authentication adapter.
+
+Connection/signing rejection is reported as `USER_REJECTED`; disconnected signing as
+`NOT_CONNECTED`; invalid XDR as `VALIDATION_ERROR`; and unavailable WebHID as
+`UNSUPPORTED_ENVIRONMENT`. Other device errors are wrapped as `CONNECTION_ERROR` or
+`SIGNING_ERROR`, preserving their cause. Failed connection attempts close the transport
+and can be retried. Concurrent requests are rejected with `CONNECTION_ERROR`; wait for
+the pending request before disconnecting. Physical unplugging clears signer state;
+reconnect before signing again. `disconnect()` removes listeners, closes the transport,
+and clears state even if closing fails.
+
+The automated suite exercises the real Ledger Stellar app against a mock APDU transport.
+For a physical-device smoke test, connect on each target browser, compare the on-device
+address, sign a testnet payment and verify its returned signature, decline a second
+request, then unplug/reconnect. Repeat with a prepared Soroban escrow transaction on
+firmware supporting its operation. Mock tests do not validate hardware display rendering.
+
+References: [Ledger Stellar app API](https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledgerjs/packages/hw-app-str/src/Str.ts),
+[firmware message signature format](https://github.com/LedgerHQ/app-stellar/blob/develop/src/handlers/sign_message.rs)
+and [Ledger WebHID integration](https://developers.ledger.com/docs/device-interaction/dmk-ts/ledgerjs/integration/web-application/web-hid-usb).
 
 ### SEP-0007 transaction deep links and QR data
 
@@ -840,6 +957,20 @@ if (!result.ok) {
 }
 ```
 
+### Integer stroop conversion
+
+`toI128ScVal` / `fromI128ScVal` and `toU128ScVal` / `fromU128ScVal`, exported from
+`@trustflow/sdk/utils`, preserve integer stroops exactly through `xdr.ScVal`.
+Encoding accepts `bigint`, safe integer `number`, or a base-10 integer string;
+decoding returns `bigint`. Signed i128 accepts `[-2^127, 2^127 - 1]`, including
+negative values. Unsigned u128 accepts `[0, 2^128 - 1]`.
+
+Invalid input (fractions, nonfinite/unsafe numbers, malformed strings or values
+outside the relevant bounds) throws `TrustFlowError` with `code: 'INVALID_AMOUNT'`.
+Range errors include the rejected value and allowed bounds; unsafe-number errors
+instruct callers to supply a bigint or numeric string. Decimal string bounds are
+validated before BigInt conversion.
+
 ### Error Codes (`TrustFlowErrorCode`) Matrix
 
 The SDK uses `TrustFlowErrorCode` to classify all failure modes. Each error instance provides an actionable `.code`, optional `.field` and `.issues` for validation details, and an underlying `.cause`.
@@ -850,6 +981,7 @@ The SDK uses `TrustFlowErrorCode` to classify all failure modes. Each error inst
 | `CONTRACT_ERROR` | Fatal | Contract invocation | Contract panicked, reverted, or hit host error during execution | Inspect error logs and contract state; do not blindly retry |
 | `INVALID_CONTRACT_CALL` | Fatal | SorobanSpec parser/encoder, contract builders | Method missing in spec, invalid argument count, wrong argument types | Verify contract ABI spec; fix method name or argument shape |
 | `VALIDATION_ERROR` | Fatal | EscrowBuilder, validation utils, client methods | Invalid Stellar address, negative amount, malformed hex/base64 | Check `error.field`; sanitize user input before resubmitting |
+| `INVALID_AMOUNT` | Actionable | i128/u128 conversion helpers | Malformed, unsafe or out-of-range integer stroops | Supply an integer within the stated bounds; use bigint or a decimal string beyond safe-number precision |
 | `UNAUTHORIZED` | Actionable | Wallet connectors, auth verification, disputes | User denied permissions, invalid token, or unauthorized caller | Prompt user to re-authenticate or connect authorized wallet |
 | `NOT_FOUND` | Informational | Escrow queries, resource lookups | Escrow ID, account, or requested state does not exist | Verify resource identifier; ensure transaction has confirmed |
 | `SIMULATION_ERROR` | Fatal / Actionable | TransactionPipeline.simulate, readContractState | Soroban simulation failed, contract trap, or restore required | If `needsRestore`, restore expired state; else fix preconditions |

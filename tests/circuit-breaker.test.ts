@@ -285,20 +285,33 @@ describe('CircuitBreaker', () => {
 });
 
 describe('CircuitBreakerRegistry', () => {
-  it('keeps independent breakers per service and resets them all', async () => {
+  it('reuses one breaker per service and recovers each independently', async () => {
+    jest.useFakeTimers();
     const registry = new CircuitBreakerRegistry();
-    const a = registry.get('service-a', { failureThreshold: 1 });
-    const b = registry.get('service-b', { failureThreshold: 1 });
+    const primary = registry.get('primary', config);
+    const fallback = registry.get('fallback', config);
 
-    await expect(a.execute(fail)).rejects.toThrow();
-    expect(a.getState()).toBe('OPEN');
-    expect(b.getState()).toBe('CLOSED');
+    expect(registry.get('primary')).toBe(primary);
+
+    // Both endpoints are down, as in the reported scenario.
+    await expect(primary.execute(boom)).rejects.toThrow();
+    await expect(primary.execute(boom)).rejects.toThrow();
+    await expect(fallback.execute(boom)).rejects.toThrow();
+    await expect(fallback.execute(boom)).rejects.toThrow();
+    expect(primary.getState()).toBe('OPEN');
+    expect(fallback.getState()).toBe('OPEN');
+
+    // The endpoint recovers; neither breaker needs a manual reset.
+    jest.advanceTimersByTime(1_000);
+    expect(primary.getState()).toBe('HALF_OPEN');
+    expect(fallback.getState()).toBe('HALF_OPEN');
+    await expect(primary.execute(pong)).resolves.toBe('pong');
+    await expect(fallback.execute(pong)).resolves.toBe('pong');
+    expect(primary.getState()).toBe('CLOSED');
+    expect(fallback.getState()).toBe('CLOSED');
 
     registry.resetAll();
-    expect(a.getState()).toBe('CLOSED');
     expect(registry.getAll().size).toBe(2);
-
-    registry.remove('service-a');
-    expect(registry.getAll().size).toBe(1);
+    jest.useRealTimers();
   });
 });

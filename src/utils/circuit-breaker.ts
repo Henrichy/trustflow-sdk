@@ -27,6 +27,12 @@ export class CircuitBreaker {
   private lastFailureTime?: number;
   private nextRetryTime?: number;
   /**
+   * Guards HALF_OPEN so only a single probe is in flight at a time.
+   *
+   * Without this, every caller that arrives while the circuit is half-open is
+   * let through at once. During an outage that is exactly the flood we are
+   * trying to avoid, so a degraded endpoint is hit by the entire backlog the
+   * moment the timeout expires.
    * Whether a HALF_OPEN health probe is currently in flight.
    *
    * HALF_OPEN exists to re-test a recovered endpoint with a *single* request.
@@ -50,11 +56,17 @@ export class CircuitBreaker {
 
   /**
    * Gets the current circuit state.
+   *
+   * Transition out of OPEN is time-based rather than driven by a caller's
+   * request succeeding, so recovery does not depend on the primary endpoint
+   * being reached from the path that failed. Reading the state is what advances
+   * the clock, which keeps the class free of timers that would keep the Node
+   * event loop alive.
    */
   getState(): CircuitState {
     if (this.state === 'OPEN') {
-      if (this.nextRetryTime && Date.now() >= this.nextRetryTime) {
-        this.setState('HALF_OPEN');
+      if (this.nextRetryTime !== undefined && Date.now() >= this.nextRetryTime) {
+        this.transitionToHalfOpen();
       }
     }
     return this.state;
@@ -94,6 +106,9 @@ export class CircuitBreaker {
       this.onFailure();
       throw error;
     } finally {
+      if (state === 'HALF_OPEN') {
+        this.probeInFlight = false;
+      }
       // Release the probe slot even if `fn` throws, so a failed probe cannot
       // wedge the circuit in a permanently blocked HALF_OPEN state.
       if (isProbe) this.probeInFlight = false;
@@ -113,6 +128,13 @@ export class CircuitBreaker {
       );
     }
 
+    if (state === 'HALF_OPEN' && !this.acquireProbeSlot()) {
+      throw new TrustFlowError(
+        'Circuit breaker is HALF_OPEN and a health probe is already in flight. Service unavailable.',
+        'NETWORK_ERROR',
+      );
+    }
+
     try {
       const result = fn();
       this.onSuccess();
@@ -120,7 +142,36 @@ export class CircuitBreaker {
     } catch (error) {
       this.onFailure();
       throw error;
+    } finally {
+      if (state === 'HALF_OPEN') {
+        this.probeInFlight = false;
+      }
     }
+  }
+
+  /**
+   * Claims the single HALF_OPEN probe slot.
+   *
+   * @returns true when the caller may issue a probe, false when one is already
+   * in flight.
+   */
+  private acquireProbeSlot(): boolean {
+    if (this.probeInFlight) return false;
+    this.probeInFlight = true;
+    return true;
+  }
+
+  /**
+   * Moves OPEN to HALF_OPEN once the reset timeout has elapsed.
+   *
+   * `nextRetryTime` is cleared here. Leaving the expired timestamp in place
+   * would mean a later CLOSED -> OPEN transition could inherit a stale retry
+   * time and re-probe immediately instead of after a fresh timeout.
+   */
+  private transitionToHalfOpen(): void {
+    this.nextRetryTime = undefined;
+    this.successCount = 0;
+    this.setState('HALF_OPEN');
   }
 
   /**
@@ -148,6 +199,9 @@ export class CircuitBreaker {
     this.failureCount++;
 
     if (this.state === 'HALF_OPEN') {
+      // The single probe failed, so the endpoint is still unhealthy: re-arm the
+      // reset timeout and go back to OPEN rather than staying half-open.
+      this.successCount = 0;
       this.setState('OPEN');
     } else if (this.state === 'CLOSED' && this.failureCount >= this.config.failureThreshold) {
       this.setState('OPEN');
@@ -207,6 +261,7 @@ export class CircuitBreaker {
       successCount: this.successCount,
       lastFailureTime: this.lastFailureTime,
       nextRetryTime: this.nextRetryTime,
+      probeInFlight: this.probeInFlight,
       config: this.config,
     };
   }

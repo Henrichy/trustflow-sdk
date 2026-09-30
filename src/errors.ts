@@ -3,6 +3,7 @@ export type TrustFlowErrorCode =
   | 'CONTRACT_ERROR'
   | 'INVALID_CONTRACT_CALL'
   | 'VALIDATION_ERROR'
+  | 'INVALID_AMOUNT'
   | 'UNAUTHORIZED'
   | 'NOT_FOUND'
   | 'SIMULATION_ERROR'
