@@ -1,4 +1,4 @@
-import { TransactionBuilder, Keypair, xdr } from '@stellar/stellar-sdk';
+import { TransactionBuilder, FeeBumpTransaction, Keypair, xdr } from '@stellar/stellar-sdk';
 import { TrustFlowError } from '../errors';
 import { logger } from '../utils/logger';
 import { isValidEscrowId, isValidStellarAddress } from '../utils/validation';
@@ -498,13 +498,20 @@ export class MultiSigEscrowClient {
   }
 
   /**
-   * Extracts the transaction hash from a transaction envelope XDR.
+   * Extracts the transaction hashes from a transaction envelope XDR.
    * Works for both regular transactions (v0, v1) and fee-bump transactions.
-   * The hash is the network-specific hash that signatures are verified against.
+   * For fee-bump transactions, returns both the outer fee-bump hash and the inner transaction hash.
    */
-  private _getTransactionHash(envelopeXdr: string, networkPassphrase: string): Buffer {
-    const tx = TransactionBuilder.fromXDR(envelopeXdr, networkPassphrase);
-    return tx.hash();
+  private _getTransactionHashes(envelopeXdr: string, networkPassphrase: string): Buffer[] {
+    try {
+      const tx = TransactionBuilder.fromXDR(envelopeXdr, networkPassphrase);
+      if (tx instanceof FeeBumpTransaction) {
+        return [tx.hash(), tx.innerTransaction.hash()];
+      }
+      return [tx.hash()];
+    } catch {
+      return [];
+    }
   }
 
   /**
@@ -518,10 +525,61 @@ export class MultiSigEscrowClient {
     baseXdr: string,
     signerAddress: string,
     networkPassphrase: string,
-  ): { ok: true } | { ok: false; error: string } {
-    return this._isValidEnvelope(signedXdr, networkPassphrase)
-      ? { ok: true }
-      : { ok: false, error: 'signedXdr is not a valid Stellar transaction envelope' };
+  ): { ok: true; hash: Buffer; signature: xdr.DecoratedSignature } | { ok: false; error: string } {
+    const baseHashes = this._getTransactionHashes(baseXdr, networkPassphrase);
+    if (baseHashes.length === 0) {
+      return { ok: false, error: 'base unsignedXdr is not a valid Stellar transaction envelope' };
+    }
+
+    const signedHashes = this._getTransactionHashes(signedXdr, networkPassphrase);
+    if (signedHashes.length === 0) {
+      return { ok: false, error: 'signedXdr is not a valid Stellar transaction envelope' };
+    }
+
+    // 1. Verify transaction hash matches
+    const hasHashMatch = baseHashes.some((b) => signedHashes.some((s) => b.equals(s)));
+    if (!hasHashMatch) {
+      return {
+        ok: false,
+        error: 'signedXdr contains a different transaction than the base unsignedXdr',
+      };
+    }
+
+    // 2. Verify the signer's signature is present and valid
+    let signedEnvelope: xdr.TransactionEnvelope;
+    try {
+      signedEnvelope = xdr.TransactionEnvelope.fromXDR(signedXdr, 'base64');
+    } catch {
+      return { ok: false, error: 'signedXdr is not a valid Stellar transaction envelope' };
+    }
+    const signatures = this._extractSignatures(signedEnvelope);
+
+    let signerKeypair: Keypair;
+    try {
+      signerKeypair = Keypair.fromPublicKey(signerAddress);
+    } catch (e) {
+      return { ok: false, error: `Invalid signer address: ${String(e)}` };
+    }
+    const expectedHint = signerKeypair.signatureHint().toString('hex');
+
+    const matchingSig = signatures.find((sig) => sig.hint().toString('hex') === expectedHint);
+
+    if (!matchingSig) {
+      return {
+        ok: false,
+        error: `signedXdr does not contain a signature from ${signerAddress}`,
+      };
+    }
+
+    const validHash = signedHashes.find((h) => signerKeypair.verify(h, matchingSig.signature()));
+    if (!validHash) {
+      return {
+        ok: false,
+        error: `signature from ${signerAddress} is invalid for this transaction`,
+      };
+    }
+
+    return { ok: true, hash: validHash, signature: matchingSig };
   }
 
   /**
@@ -532,59 +590,16 @@ export class MultiSigEscrowClient {
    */
   private _isValidEnvelope(envelopeXdr: string, networkPassphrase: string): boolean {
     try {
-      new Transaction(envelopeXdr, networkPassphrase);
+      TransactionBuilder.fromXDR(envelopeXdr, networkPassphrase);
       return true;
     } catch {
       try {
-        // FeeBump transactions are also valid envelopes
         xdr.TransactionEnvelope.fromXDR(envelopeXdr, 'base64');
         return true;
       } catch {
         return false;
       }
     }
-
-    try {
-      signedHash = this._getTransactionHash(signedXdr, networkPassphrase);
-    } catch (e) {
-      return { ok: false, error: `signedXdr is invalid: ${String(e)}` };
-    }
-
-    // 1. Verify transaction hash matches
-    if (!baseHash.equals(signedHash)) {
-      return {
-        ok: false,
-        error: 'signedXdr contains a different transaction than the base unsignedXdr',
-      };
-    }
-
-    // 2. Verify the signer's signature is present and valid
-    const signedEnvelope = xdr.TransactionEnvelope.fromXDR(signedXdr, 'base64');
-    const signatures = this._extractSignatures(signedEnvelope);
-
-    // Compute the signer's signature hint (last 4 bytes of public key)
-    const signerKeypair = Keypair.fromPublicKey(signerAddress);
-    const expectedHint = signerKeypair.signatureHint().toString('hex');
-
-    // Find a signature with matching hint
-    const matchingSig = signatures.find((sig) => sig.hint().toString('hex') === expectedHint);
-
-    if (!matchingSig) {
-      return {
-        ok: false,
-        error: `signedXdr does not contain a signature from ${signerAddress}`,
-      };
-    }
-
-    // Cryptographically verify the signature
-    if (!signerKeypair.verify(signedHash, matchingSig.signature())) {
-      return {
-        ok: false,
-        error: `signature from ${signerAddress} is invalid for this transaction`,
-      };
-    }
-
-    return { ok: true, hash: signedHash, signature: matchingSig };
   }
 
   /**

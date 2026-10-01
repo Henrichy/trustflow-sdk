@@ -144,7 +144,7 @@ export class SorobanContractClient extends AbstractContractClient {
       .setTimeout(30)
       .build();
 
-    return simulateContractCall(this.client, tx.toXDR('base64'));
+    return simulateContractCall(this.client, tx.toXDR());
   }
 }
 

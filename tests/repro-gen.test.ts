@@ -14,7 +14,7 @@ const t = {
     xdr.ScSpecTypeDef.scSpecTypeVec(new xdr.ScSpecTypeVec({ elementType })),
   tuple: (valueTypes: xdr.ScSpecTypeDef[]) =>
     xdr.ScSpecTypeDef.scSpecTypeTuple(new xdr.ScSpecTypeTuple({ valueTypes })),
-  udt: (name: string) => xdr.ScSpecTypeDef.scSpecTypeUdt(new xdr.ScSpecUdt({ name })),
+  udt: (name: string) => xdr.ScSpecTypeDef.scSpecTypeUdt(new xdr.ScSpecTypeUdt({ name })),
 };
 
 function structEntry(
@@ -62,7 +62,8 @@ it('repro: generate code for a struct + two functions', () => {
   ];
 
   const code = generateTypeScriptBindings(specEntries, { className: 'Gen' });
-  const outDir = '/private/var/folders/wz/cw9w34r96tgdpclncmrdjkz80000gn/T/opencode';
-  fs.writeFileSync(path.join(outDir, 'gen.ts'), code);
+  const outDir = path.join(require("os").tmpdir(), "opencode");
+  fs.mkdirSync(outDir, { recursive: true });
+  fs.writeFileSync(path.join(outDir, "gen.ts"), code);
   console.log(code);
 });

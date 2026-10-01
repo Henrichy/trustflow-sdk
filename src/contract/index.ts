@@ -18,7 +18,7 @@ export {
 } from './bindings';
 export { invokeContract, type SignAndSubmitFn, type InvokeContractOptions } from './invoke';
 export { readContractState, type ReadContractStateOptions } from './read';
-export { simulateContractCall, simulateBatch } from './simulate';
+export { simulateContractCall } from './simulate';
 export { simulateTransaction, type SimulationOutcome } from './simulation';
 export {
   buildCreateEscrowArgs,
@@ -28,7 +28,4 @@ export {
   buildDisputeArgs,
   buildVoteArgs,
 } from './build';
-export type { ContractInvocation, SimulateBatchOptions } from './simulate';
-export { SorobanSpec } from './spec';
-export type { SorobanSpecInput, SorobanUnionValue } from './spec';
 export type { SimulationResult, SimulateContractCallOptions } from './simulate';

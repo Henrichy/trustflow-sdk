@@ -2,7 +2,6 @@ export { useWallet } from './useWallet';
 export { useBalance } from './useBalance';
 export { useTransaction } from './useTransaction';
 export { useEscrow } from './useEscrow';
-export type { UseEscrowOptions, UseEscrowResult } from './useEscrow';
 
 // `useEscrow` calls the free functions `createEscrow(client, params)` /
 // `releaseEscrow(client, params)`. Both are re-exported by

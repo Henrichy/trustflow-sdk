@@ -4,7 +4,6 @@ import type { ContractCallResult } from '../types/contract';
 import type { AccountOptions } from '../accounts/types';
 import { withTransientRetry } from '../utils/node-retry';
 import { logger } from '../utils/logger';
-import { withSdkSpan } from '../utils/tracing';
 import type { ReadContractStateOptions } from './read';
 import { simulateTransaction } from './simulation';
 
@@ -71,12 +70,7 @@ export async function invokeContract(
   const server = client.getSorobanServer();
   const contract = new Contract(client.contractId);
 
-  logger.debug('Invoking contract method', {
-    method,
-    caller,
-    contractId: client.contractId,
-    argsCount: args.length,
-  });
+  logger.debug('Invoking contract method', { method, caller, contractId: client.contractId, argsCount: args.length });
 
   try {
     const account = await withTransientRetry(
@@ -100,7 +94,6 @@ export async function invokeContract(
       tx,
       { ...options.retry, timeoutMs: options.timeoutMs ?? client.timeoutMs },
       client.retryConfig,
-      client.tracerProvider,
     );
 
     if (!simulation.success) {
@@ -114,36 +107,31 @@ export async function invokeContract(
     logger.debug('Contract simulation successful', { method, gasUsed: simulation.cost });
 
     if (!signAndSubmit) {
+      const gasUsed = Number(simulation.cost?.cpuInsns || simulation.minResourceFee || 0);
       return {
         success: true,
         returnValue: simulation.returnValue,
-        gasUsed: 0,
+        gasUsed,
       };
     }
 
-    const prepared = rpc
-      .assembleTransaction(tx, {
-        transactionData: simulation.transactionData ?? '',
-        events: [],
-        minResourceFee: simulation.minResourceFee ?? '0',
-        result: { retval: simulation.returnValue as any },
-      } as any)
-      .build();
+    const prepared = rpc.assembleTransaction(tx, {
+      transactionData: simulation.transactionData ?? '',
+      events: [],
+      minResourceFee: simulation.minResourceFee ?? '0',
+      result: { retval: simulation.returnValue as any },
+    } as any).build();
     const xdr = prepared.toXDR();
     logger.debug('Signing and submitting transaction', { method, xdrLength: xdr.length });
-    const txHash = await withSdkSpan(
-      client.getTracer(),
-      'trustflow.tx.sign_and_submit',
-      { 'stellar.network': client.network, 'stellar.contract.method': method },
-      async () => signAndSubmit(xdr),
-    );
+    const txHash = await signAndSubmit(xdr);
 
     logger.info('Contract call submitted', { method, txHash });
+    const gasUsed = Number(simulation.cost?.cpuInsns || simulation.minResourceFee || 0);
     return {
       success: true,
       txHash,
       returnValue: simulation.returnValue,
-      gasUsed: 0,
+      gasUsed,
     };
   } catch (e) {
     logger.error('Contract invocation failed', { method, caller, error: e });

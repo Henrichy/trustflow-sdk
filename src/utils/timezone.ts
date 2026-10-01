@@ -177,3 +177,126 @@ export function formatISO(date: Date): string {
   }
   return toUTC(date);
 }
+
+import { TrustFlowError } from '../errors';
+
+/**
+ * Normalizes a Date, millisecond timestamp, second timestamp, or ISO string to UTC epoch seconds.
+ * Uses `Math.floor(date.getTime() / 1000)` to ensure deterministic, timezone-independent epoch seconds.
+ *
+ * @param input - Date instance, timestamp in ms or seconds, or ISO string
+ * @returns UTC Unix timestamp in seconds
+ */
+export interface FutureExpirationOptions {
+  referenceDate?: Date;
+  minBufferSeconds?: number;
+}
+
+/**
+ * Normalizes Date, number (seconds or ms), or ISO 8601 string to integer UTC epoch seconds.
+ *
+ * Uses `Math.floor(date.getTime() / 1000)` ensuring identical deterministic values regardless of client local timezone.
+ *
+ * @param input - Date instance, timestamp number, or ISO date string
+ * @param field - Field name for error attribution (defaults to 'expiration')
+ * @returns Non-negative UTC epoch seconds
+ * @throws {TrustFlowError} `INVALID_EXPIRATION` if input is invalid or cannot be parsed
+ */
+export function normalizeToUtcSeconds(
+  input: Date | number | string,
+  field = 'expiration',
+): number {
+  let ms: number;
+  if (input instanceof Date) {
+    if (Number.isNaN(input.getTime())) {
+      throw TrustFlowError.invalidExpiration('Invalid Date instance', field);
+    }
+    ms = input.getTime();
+  } else if (typeof input === 'number') {
+    if (!Number.isFinite(input) || input < 0) {
+      throw TrustFlowError.invalidExpiration(
+        'Expected a non-negative finite number',
+        field,
+      );
+    }
+    // If input is greater than 1e11, treat as milliseconds, else seconds
+    ms = input > 1e11 ? input : input * 1000;
+  } else if (typeof input === 'string') {
+    const parsed = new Date(input);
+    if (Number.isNaN(parsed.getTime())) {
+      throw TrustFlowError.invalidExpiration(`Invalid date string: "${input}"`, field);
+    }
+    ms = parsed.getTime();
+  } else {
+    throw TrustFlowError.invalidExpiration('Expected Date, number, or string', field);
+  }
+
+  return Math.floor(ms / 1000);
+}
+
+/**
+ * Validates that an expiration timestamp is in the future.
+ *
+ * @param input - UTC epoch seconds number, Date, or string
+ * @param field - Field name for error attribution
+ * @param options - Reference date or minimum future buffer in seconds
+ * @returns The validated UTC epoch seconds
+ * @throws {TrustFlowError} `INVALID_EXPIRATION` if expiration is in the past or present
+ */
+export function validateFutureExpiration(
+  input: Date | number | string,
+  field = 'expiration',
+  options?: FutureExpirationOptions | Date,
+): number {
+  const seconds = normalizeToUtcSeconds(input, field);
+  const opts: FutureExpirationOptions =
+    options instanceof Date ? { referenceDate: options } : options ?? {};
+
+  const refMs = opts.referenceDate instanceof Date ? opts.referenceDate.getTime() : Date.now();
+  const nowSeconds = Math.floor(refMs / 1000);
+  const minBuffer = opts.minBufferSeconds ?? 0;
+
+  if (seconds <= nowSeconds + minBuffer) {
+    throw TrustFlowError.invalidExpiration(
+      `Expiration timestamp cannot be in the past and must be in the future (got ${seconds}, current ${nowSeconds})`,
+      field,
+    );
+  }
+  return seconds;
+}
+
+/**
+ * Normalizes milestone expiration or an array of milestones with sequential deadline checks.
+ */
+export function normalizeMilestoneExpiration<
+  T extends { deadline?: Date | number | string; expiration?: Date | number | string },
+>(
+  input: Date | number | string | T[],
+  referenceDate?: Date,
+): any {
+  if (Array.isArray(input)) {
+    let lastDeadline = -1;
+    return input.map((milestone, idx) => {
+      const field = `milestones[${idx}].deadline`;
+      const val = milestone.deadline ?? milestone.expiration;
+      if (val === undefined) {
+        throw TrustFlowError.invalidExpiration(`Milestone at index ${idx} is missing deadline`, field);
+      }
+      const seconds = validateFutureExpiration(val, field, { referenceDate });
+      if (seconds <= lastDeadline) {
+        throw TrustFlowError.invalidExpiration(
+          `Milestones must be in chronological order: index ${idx} (${seconds}) <= previous (${lastDeadline})`,
+          field,
+        );
+      }
+      lastDeadline = seconds;
+      return {
+        ...milestone,
+        deadline: seconds,
+      };
+    });
+  }
+
+  const seconds = normalizeToUtcSeconds(input as Date | number | string);
+  return validateFutureExpiration(seconds, 'expiration', { referenceDate });
+}

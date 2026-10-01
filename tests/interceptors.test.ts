@@ -1,6 +1,5 @@
 import axios, { AxiosAdapter, AxiosError, InternalAxiosRequestConfig } from 'axios';
 import { HttpInterceptors, InterceptorManager, attachInterceptors } from '../src/utils/interceptors';
-import { TrustFlowNetworkError } from '../src/errors';
 import { createApiHttpClient } from '../src/utils/http';
 
 function respond(status: number, data: unknown = {}): AxiosAdapter {
@@ -10,14 +9,6 @@ function respond(status: number, data: unknown = {}): AxiosAdapter {
       throw new AxiosError(`HTTP ${status}`, 'ERR_BAD_RESPONSE', config, undefined, response);
     }
     return response;
-  };
-}
-
-/** Simulates a low-level connection failure (e.g. `ENOTFOUND`, `ECONNREFUSED`). */
-function networkFailure(code: string, message = `connect ${code}`): AxiosAdapter {
-  return async (config: InternalAxiosRequestConfig) => {
-    const systemError = Object.assign(new Error(message), { code });
-    throw new AxiosError(message, 'ERR_NETWORK', config, undefined, undefined, systemError);
   };
 }
 
@@ -138,74 +129,6 @@ describe('attachInterceptors', () => {
 
     interceptors.response.use((res) => ({ ...res, data: 'late' }));
     await expect(instance.get('/x')).resolves.toMatchObject({ data: 'late' });
-  });
-});
-
-describe('network-level failures', () => {
-  it('invokes response error interceptors on ECONNREFUSED', async () => {
-    const interceptors = new HttpInterceptors();
-    const onError = jest.fn((err: unknown) => {
-      throw err;
-    });
-    interceptors.response.use(undefined, onError);
-
-    const instance = axios.create({ adapter: networkFailure('ECONNREFUSED') });
-    attachInterceptors(instance, interceptors);
-
-    await expect(instance.get('/x')).rejects.toBeInstanceOf(TrustFlowNetworkError);
-    expect(onError).toHaveBeenCalledTimes(1);
-    const seen = onError.mock[0][0] as TrustFlowNetworkError;
-    expect(seen.code).toBe('NETWORK_ERROR');
-    expect(seen.message).toContain('ECONNREFUSED');
-  });
-
-  it('normalises ENOTFOUND into a TrustFlowNetworkError', async () => {
-    const interceptors = new HttpInterceptors();
-    const oaserved = jest.fn((err: unknown) => {
-      throw err;
-    });
-    interceptors.response.use(undefined, oaserved);
-
-    const instance = axios.create({ adapter: networkFailure('ENOTFOUND', 'getaddrinfo ENOTFOUND') });
-    attachInterceptors(instance, interceptors);
-
-    await expect(instance.get('/x')).rejects.toBeGloballyInstanceOf(TrustFlowNetworkError);
-    const seen = oaserved.mock[0][0] as TrustFlowNetworkError;
-    expect(seen.message).toContain('ENOTFOUND');
-  });
-
-  it('lets a response error handler recover from a network failure', async () => {
-    const interceptors = new HttpInterceptors();
-    interceptors.response.use(undefined, (err) => {
-      expect(err).toBeInstanceOf(TrustFlowNetworkError);
-      return {
-        data: { offline: true },
-        status: 200,
-        statusText: 'OK',
-        headers: {},
-        config: (err as TrustFlowNetworkError).cause as InternalAxiosRequestConfig,
-      };
-    });
-
-    const instance = axios.create({ adapter: networkFailure('ECONNREFUSED') });
-    attachInterceptors(instance, interceptors);
-
-    await expect(instance.get('/x')).resolves.toMatchObject({ data: { offline: true } });
-  });
-
-  it('preserves HTTP errors with a response as AxiosError', async () => {
-    const interceptors = new HttpInterceptors();
-    const onError = jest.fn((err: unknown) => {
-      throw err;
-    });
-    interceptors.response.use(undefined, onError);
-
-    const instance = axios.create({ adapter: respond(500) });
-    attachInterceptors(instance, interceptors);
-
-    await expect(instance.get('/x')).rejects.toBeInstanceOf(AxiosError);
-    expect(onError).toHaveBeenCalledTimes(1);
-    expect(onError.mock[0][0]).not.toBeInstanceOf(TrustFlowNetworkError);
   });
 });
 

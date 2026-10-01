@@ -8,37 +8,12 @@ import type {
   RevealVoteResult,
 } from '../types/juror';
 import type { SDKResult } from '../types/index';
-
+import { isValidEscrowId, isValidStellarAddress, isValidBase64 } from '../utils/validation';
 import { buildVoteArgs } from '../contract/build';
 import { randomBytes } from '../utils/crypto';
 import { TrustFlowError } from '../errors';
-import { VoteSchema } from '../schemas';
 
 const VALID_CHOICES: VoteChoice[] = ['approve', 'reject', 'abstain'];
-
-/**
- * Minimal shape of dispute round metadata retrieved from IPFS.
- * Only the fields the SDK reads to decorate a vote are declared here;
- * anything else is passed through untouched.
- */
-export interface DisputeMetadata {
-  /** Optional human-readable label for the dispute round. */
-  title?: string;
-  /** Optional description of the dispute. */
-  description?: string;
-  /** Optional list of evidence CIDs attached to the dispute. */
-  evidence?: string[];
-  /** Allow additional IPFS-supplied fields. */
-  [key: string]: unknown;
-}
-
-/**
- * Optional callback used to resolve dispute round metadata from IPFS.
- * Returning `null` or `undefined` means the metadata is not available.
- */
-export type DisputeMetadataResolver = (
-  disputeId: string,
-) => Promise<DisputeMetadata | null | undefined>;
 
 /**
  * Constructs a vote commitment matching the contracts/trustflow/src/lib.rs hash_vote
@@ -141,10 +116,7 @@ export function revealVote(voteForDepositor: boolean, salt: Uint8Array): RevealV
 export class JurorClient {
   private readonly storedSalts = new Map<string, Uint8Array>();
 
-  constructor(
-    private readonly config: ContractConfig,
-    private readonly metadataResolver?: DisputeMetadataResolver,
-  ) {}
+  constructor(private readonly config: ContractConfig) {}
 
   /**
    * Constructs a vote commitment matching the contract hash_vote preimage layout:
@@ -205,60 +177,26 @@ export class JurorClient {
   /**
    * Casts a juror's vote on a dispute via the TrustFlow contract.
    *
-   * If a `DisputeMetadataResolver` was supplied to the constructor, the
-   * IPDFS round metadata is loaded best-effort. Missing or invalid metadata
-   * never blocks the vote — the on-chain dispute ID is authoritative — but is
-   * reported back on the result as a typed `DISPUVE_METADATA_UNAVAILABLE`
-   * error so callers can surface it if they care.
-   *
    * @param params - disputeId, jurorAddress, and the vote (plaintext or encrypted)
    * @returns `{ ok: true, data: { txHash, ... } }` on success, `{ ok: false, error }` on failure
    */
   async vote(params: CastVoteParams): Promise<SDKResult<CastVoteResult>> {
-    const validation = VoteSchema.safeParse({
-      disputeId: params.disputeId,
-      jurorAddress: params.jurorAddress,
-      vote: params.vote,
-    });
-    if (!validation.success) {
-      const fieldErrors = Object.entries(validation.error.flatten().fieldErrors)
-        .map(([field, msgs]) => `${field}: ${msgs?.join(', ')}`)
-        .join('; ');
-      return { ok: false, error: `Validation failed: ${fieldErrors}` };
+    if (!isValidEscrowId(params.disputeId)) {
+      return { ok: false, error: 'disputeId is required' };
+    }
+    if (!isValidStellarAddress(params.jurorAddress)) {
+      return {
+        ok: false,
+        error: `Invalid Stellar address for "jurorAddress": ${params.jurorAddress}`,
+      };
     }
 
-    if (!params.vote.encrypted && !VALID_CHOICES.includes(params.vote.choice as VoteChoice)) {
-      return { ok: false, error: `vote.choice must be one of: ${VALID_CHOICES.join(', ')}` };
-    }
-
-    // Best-effort IPDFS metadata lookup. Metadata is purely informational:
-    // the on-chain dispute ID is authoritative, so a missing or malformed
-    // response must not block the vote or raise an uncaught TypeError.
-    let metadataError: TrustFlowError | undefined;
-    let metadata: DisputeMetadata | undefined;
-    if (this.metadataResolver) {
-      try {
-        const resolved = await this.metadataResolver(params.disputeId);
-        if (resolved === null || resolved === undefined) {
-          metadataError = TrustFlowError.disputeMetadataUnavailable(
-            params.disputeId,
-            'no metadata returned from IPFS',
-          );
-        } else if (typeof resolved !== 'object' || Array.isArray(resolved)) {
-          metadataError = TrustFlowError.disputeMetadataUnavailable(
-            params.disputeId,
-            'invalid metadata payload (expected an object)',
-          );
-        } else {
-          metadata = resolved as DisputeMetadata;
-        }
-      } catch (e) {
-        metadataError = TrustFlowError.disputeMetadataUnavailable(
-          params.disputeId,
-          e instanceof Error ? e.message : String(e),
-          e,
-        );
+    if (params.vote.encrypted) {
+      if (!isValidBase64(params.vote.ciphertext)) {
+        return { ok: false, error: 'vote.ciphertext must be a non-empty base64-encoded string' };
       }
+    } else if (!VALID_CHOICES.includes(params.vote.choice)) {
+      return { ok: false, error: `vote.choice must be one of: ${VALID_CHOICES.join(', ')}` };
     }
 
     let args: unknown[];
@@ -278,8 +216,6 @@ export class JurorClient {
         disputeId: params.disputeId,
         jurorAddress: params.jurorAddress,
         encrypted: params.vote.encrypted,
-        metadata,
-        metadataError,
       },
     };
   }

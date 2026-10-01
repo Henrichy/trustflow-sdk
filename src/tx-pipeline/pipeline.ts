@@ -237,9 +237,6 @@ export class TransactionPipeline {
     // every stage's RPC calls are bounded by `withTimeout` in `withRetry`,
     // defaulting to the client-wide `ClientConfig.timeoutMs`.
     this.server = new rpc.Server(client.rpcUrl, { allowHttp: Config.isAllowHttp() });
-    installTraceContextInterceptor(
-      this.server.httpClient as unknown as import('axios').AxiosInstance,
-    );
   }
 
   /**
@@ -300,10 +297,7 @@ export class TransactionPipeline {
       this.pipelineLogger.debug('Transaction assembled', { sourceAccount: params.sourceAccount });
       return ok(builder.build());
     } catch (e) {
-      this.pipelineLogger.error('Transaction assembly failed', {
-        sourceAccount: params.sourceAccount,
-        error: e,
-      });
+      this.pipelineLogger.error('Transaction assembly failed', { sourceAccount: params.sourceAccount, error: e });
       return fail(
         TrustFlowError.assemblyFailed(
           `could not assemble transaction for ${params.sourceAccount}`,
@@ -369,6 +363,28 @@ export class TransactionPipeline {
         return ok(response.data);
       },
     );
+    const outcome = await withRetry(
+      () => this.server.simulateTransaction(tx),
+      options,
+      'simulate',
+      this.client.timeoutMs,
+    );
+    if (!outcome.ok) {
+      if (outcome.error.code === 'RETRY_EXHAUSTED') {
+        return fail(
+          TrustFlowError.simulationFailed(
+            'simulateTransaction request failed',
+            outcome.error.cause,
+          ),
+        );
+      }
+      return fail(outcome.error);
+    }
+    const response = outcome.data;
+    if (rpc.Api.isSimulationError(response)) {
+      return fail(TrustFlowError.simulationFailed(response.error));
+    }
+    return ok(response);
   }
 
   /**
@@ -472,7 +488,31 @@ export class TransactionPipeline {
           'prepare',
           this.client.timeoutMs,
         );
+    const multiplier = options?.resourceFeeMultiplier ?? DEFAULT_RESOURCE_FEE_MULTIPLIER;
+
+    this.pipelineLogger.debug('Preparing transaction', { resourceFeeMultiplier: multiplier });
+    return withRetry(
+      async () => {
+        const simulation = await this.server.simulateTransaction(tx);
+        if (rpc.Api.isSimulationError(simulation)) {
+          throw TrustFlowError.simulationFailed(simulation.error);
+        }
+        if (rpc.Api.isSimulationRestore(simulation)) {
+          throw TrustFlowError.simulationFailed(
+            'simulation requires restore preamble',
+            simulation.restorePreamble,
+          );
+        }
+
+        const paddedFee = Math.ceil(Number(simulation.minResourceFee) * multiplier).toString();
+        simulation.transactionData.setResourceFee(paddedFee);
+        this.pipelineLogger.debug('Transaction prepared', { paddedFee, minResourceFee: simulation.minResourceFee });
+
+        return rpc.assembleTransaction(tx, { ...simulation, minResourceFee: paddedFee }).build();
       },
+      options,
+      'prepare',
+      this.client.timeoutMs,
     );
   }
 
@@ -682,7 +722,38 @@ export class TransactionPipeline {
           'submit',
           this.client.timeoutMs,
         );
+    this.pipelineLogger.debug('Submitting transaction', { isFeeBump: tx instanceof FeeBumpTransaction });
+    return withRetry(
+      async (attempt) => {
+        this.pipelineLogger.debug('Sending transaction to network', { attempt, hash: tx.hash?.toString() });
+        const sendResult = await this.server.sendTransaction(tx);
+
+        if (sendResult.status === 'ERROR') {
+          // Terminal: the node evaluated and rejected this envelope.
+          throw TrustFlowError.submissionFailed(
+            `node rejected transaction (${sendResult.hash})`,
+            sendResult.errorResult,
+          );
+        }
+        if (sendResult.status === 'TRY_AGAIN_LATER') {
+          // The node explicitly deferred: nothing was broadcast, so a replay
+          // is safe and expected.
+          throw markTransient(TrustFlowError.submissionFailed('node reported TRY_AGAIN_LATER'));
+        }
+
+        const ledger = await this.pollForConfirmation(sendResult.hash, options);
+
+        return {
+          hash: sendResult.hash,
+          ledger,
+          feeBumped: tx instanceof FeeBumpTransaction,
+          attempts: attempt,
+          feeCharged: tx.fee,
+        };
       },
+      options,
+      'submit',
+      this.client.timeoutMs,
     );
   }
 
@@ -719,9 +790,7 @@ export class TransactionPipeline {
       // Only the queue wait raises a TrustFlowError here; `execute` reports
       // expected failures through its result, so anything else is unexpected.
       if (e instanceof TrustFlowError && e.code === 'TIMEOUT') {
-        this.pipelineLogger.error('Pipeline queue timeout', {
-          sourceAccount: params.sourceAccount,
-        });
+        this.pipelineLogger.error('Pipeline queue timeout', { sourceAccount: params.sourceAccount });
         return fail(e);
       }
       throw e;
@@ -750,19 +819,11 @@ export class TransactionPipeline {
     }
 
     this.pipelineLogger.debug('Signing transaction', { signersCount: params.signers.length });
-    await withSdkSpan(
-      this.client.getTracer(),
-      'trustflow.tx.sign',
-      { 'stellar.network': this.client.network, 'signer.count': params.signers.length },
-      async () => prepared.data.sign(...params.signers),
-    );
+    prepared.data.sign(...params.signers);
 
     const submitted = await this.submit(prepared.data, params.submit);
     if (submitted.ok) {
-      this.pipelineLogger.info('Transaction confirmed', {
-        hash: submitted.data.hash,
-        ledger: submitted.data.ledger,
-      });
+      this.pipelineLogger.info('Transaction confirmed', { hash: submitted.data.hash, ledger: submitted.data.ledger });
       return submitted;
     }
 
@@ -785,12 +846,7 @@ export class TransactionPipeline {
       return submitted;
     }
 
-    await withSdkSpan(
-      this.client.getTracer(),
-      'trustflow.tx.sign',
-      { 'stellar.network': this.client.network, 'signer.count': 1, 'stellar.fee_bump': true },
-      async () => feeBumped.data.sign(feeBumpOptions.feeSource),
-    );
+    feeBumped.data.sign(feeBumpOptions.feeSource);
 
     await this.notifyFeeBump(feeBumpOptions, {
       previousHash: prepared.data.hash().toString('hex'),
@@ -808,9 +864,7 @@ export class TransactionPipeline {
       return escalatedSubmission;
     }
 
-    this.pipelineLogger.info('Fee-bump transaction confirmed', {
-      hash: escalatedSubmission.data.hash,
-    });
+    this.pipelineLogger.info('Fee-bump transaction confirmed', { hash: escalatedSubmission.data.hash });
     return ok({ ...escalatedSubmission.data, feeBumped: true });
   }
 

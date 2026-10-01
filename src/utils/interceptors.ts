@@ -1,5 +1,4 @@
 import type { AxiosInstance, AxiosResponse, InternalAxiosRequestConfig } from 'axios';
-import { TrustFlowNetworkError } from '../errors';
 
 /** Request config passed through request interceptors before a request is sent. */
 export type InterceptorRequestConfig = InternalAxiosRequestConfig;
@@ -125,41 +124,11 @@ export class HttpInterceptors {
  *
  * Interceptors are resolved lazily on each request, so handlers added or
  * ejected after the client is created still take effect.
- *
- * Low-level network failures (e.g. `ECONNREFUSED`, `ENOTFOUND`) are
- * normalised into {@link TrustFlowNetworkError} before being handed to the
- * response error interceptors, so all failure types are observable and
- * consistently formatted.
  */
 export function attachInterceptors(instance: AxiosInstance, interceptors: HttpInterceptors): void {
   instance.interceptors.request.use((config) => interceptors.request.run(config));
   instance.interceptors.response.use(
     (response) => interceptors.response.run(response),
-    (error: unknown) => {
-      const normalised = normaliseResponseError(error);
-      return interceptors.response.run(normalised, true);
-    },
+    (error: unknown) => interceptors.response.run(error, true),
   );
-}
-
-/**
- * Normalises a transport error so the response interceptor chain sees a
- * consistent shape regardless of whether the failure was an HTTP status
- * or a low-level connection error.
- *
- * - Errors that already carry a response (axios `BAD_RESPONSE`, `NOT_FOUND`,
- *   etc.) are passed through unchanged so existing handlers continue to
- *   work.
- * - Errors with no response (network failures, timeouts) are wrapped in a
- *   {@link TrustFlowNetworkError}.
- */
-export function normaliseResponseError(error: unknown): unknown {
-  if (error && typeof error === 'object' && 'response' in error) {
-    const response = (error as { response?: unknown }).response;
-    if (response) {
-      return error;
-    }
-  }
-
-  return TrustFlowNetworkError.fromError(error);
 }

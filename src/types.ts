@@ -1,11 +1,10 @@
-import type { IPFSConfig } from './storage';
-import type { ApiRetryConfig } from './utils/http';
-import type { AddAccountInput } from './accounts/types';
-import type { LogLevel, Logger } from './utils/logger';
-import type { Horizon, rpc } from '@stellar/stellar-sdk';
-import type { TracerProvider } from '@opentelemetry/api';
+import type { IPFSConfig } from "./storage";
+import type { ApiRetryConfig } from "./utils/http";
+import type { AddAccountInput } from "./accounts/types";
+import type { LogLevel, Logger } from "./utils/logger";
+import type { Horizon, rpc } from "@stellar/stellar-sdk";
 
-export type Network = 'TESTNET' | 'MAINNET';
+export type Network = "TESTNET" | "MAINNET";
 
 /** Options for opt-in caching of Horizon balance lookups. */
 export interface BalanceCacheConfig {
@@ -61,19 +60,17 @@ export interface ClientConfig {
   rpcServer?: rpc.Server;
   /** Dependency injection seam for testing: custom Horizon server instance. */
   horizonServer?: Horizon.Server;
-  /** Optional OpenTelemetry provider used to create SDK spans. */
-  tracerProvider?: TracerProvider;
   /** Logging configuration for the SDK client. */
   logging?: LoggingConfig;
 }
 
 /** Status of an escrow contract. */
 export enum EscrowStatus {
-  Pending = 'PENDING',
-  Active = 'ACTIVE',
-  Released = 'RELEASED',
-  Disputed = 'DISPUTED',
-  Cancelled = 'CANCELLED',
+  Pending = "PENDING",
+  Active = "ACTIVE",
+  Released = "RELEASED",
+  Disputed = "DISPUTED",
+  Cancelled = "CANCELLED",
 }
 
 /** Escrow entity representation. */
@@ -85,6 +82,7 @@ export interface Escrow {
   status: EscrowStatus;
   createdAt: number;
   expiresAt?: number;
+  deadline?: number;
   metadata?: Record<string, string>;
 }
 
@@ -94,6 +92,15 @@ export interface CreateEscrowParams {
   recipient: string;
   amountStroops: bigint;
   durationBlocks?: number;
+  deadline?: Date | number | string;
+  expiresAt?: Date | number | string;
+  milestones?: Array<{
+    amount?: bigint;
+    description?: string;
+    deadline?: Date | number | string;
+    expiration?: Date | number | string;
+    [key: string]: unknown;
+  }>;
   metadata?: Record<string, string>;
 }
 

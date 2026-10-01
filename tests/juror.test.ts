@@ -1,5 +1,5 @@
 import { Keypair } from '@stellar/stellar-sdk';
-import { JurorClient, createVoteCommitment, revealVote, DISPUTE_METADATA_UNAVAILABLE } from '../src/juror/client';
+import { JurorClient, createVoteCommitment, revealVote } from '../src/juror/client';
 
 import type { ContractConfig } from '../src/types/contract';
 
@@ -55,7 +55,7 @@ describe('JurorClient.vote', () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.error).toMatch(/Validation failed.*disputeId/i);
+      expect(result.error).toMatch(/disputeId/);
     }
   });
 
@@ -69,7 +69,7 @@ describe('JurorClient.vote', () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.error).toMatch(/Validation failed.*jurorAddress/i);
+      expect(result.error).toMatch(/jurorAddress/);
     }
   });
 
@@ -98,7 +98,7 @@ describe('JurorClient.vote', () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.error).toMatch(/Validation failed.*vote/i);
+      expect(result.error).toMatch(/ciphertext/);
     }
   });
 
@@ -112,80 +112,7 @@ describe('JurorClient.vote', () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.error).toMatch(/Validation failed.*vote/i);
-    }
-  });
-
-  it('handles missing IPFS dispute metadata gracefully', async () => {
-    const jurors = new JurorClient(CONFIG, {
-      fetchDisputeMetadata: async () => null,
-    });
-    const result = await jurors.vote({
-      disputeId: 'dsp-1',
-      jurorAddress: JUROR_ADDRESS,
-      vote: { encrypted: false, choice: 'approve' },
-    });
-
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.data.disputeId).toBe('dsp-1');
-      expect(result.data.metadata).toBeUndefined();
-    }
-  });
-
-  it('handles 404 IPFS dispute metadata gracefully', async () => {
-    const jurors = new JurorClient(CONFIG, {
-      fetchDisputeMetadata: async () => {
-        const err: any = new Error('Not Found');
-        err.status = 404;
-        throw err;
-      },
-    });
-    const result = await jurors.vote({
-      disputeId: 'dsp-1',
-      jurorAddress: JUROR_ADDRESS,
-      vote: { encrypted: false, choice: 'approve' },
-    });
-
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.data.disputeId).toBe('dsp-1');
-    }
-  });
-
-  it('returns DISPUTE_METADATA_UNAVAILABLE when metadata is required but missing', async () => {
-    const jurors = new JurorClient(CONFIG, {
-      fetchDisputeMetadata: async () => null,
-    });
-    const result = await jurors.vote({
-      disputeId: 'dsp-1',
-      jurorAddress: JUROR_ADDRESS,
-      vote: { encrypted: false, choice: 'approve' },
-      requireMetadata: true,
-    });
-
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error).toMatch(/DISPUTE_METADATA_UNAVAILABLE/);
-      expect(result.code).toBe(DISPUTE_METADATA_UNAVAILABLE);
-    }
-  });
-
-  it('returns DISPUTE_METADATA_UNAVAILABLE for invalid IPFS metadata payloads', async () => {
-    const jurors = new JurorClient(CONFIG, {
-      fetchDisputeMetadata: async () => ({ invalid: true }) as any,
-    });
-    const result = await jurors.vote({
-      disputeId: 'dsp-1',
-      jurorAddress: JUROR_ADDRESS,
-      vote: { encrypted: false, choice: 'approve' },
-      requireMetadata: true,
-    });
-
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error).toMatch(/DISPUTE_METADATA_UNAVAILABLE/);
-      expect(result.code).toBe(DISPUTE_METADATA_UNAVAILABLE);
+      expect(result.error).toMatch(/ciphertext/);
     }
   });
 });
